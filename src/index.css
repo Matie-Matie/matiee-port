@@ -1,0 +1,85 @@
+@import "tailwindcss";
+@import "@fontsource/poppins/400.css";
+@import "@fontsource/poppins/500.css";
+@import "@fontsource/poppins/600.css";
+@import "@fontsource/poppins/700.css";
+
+/* ── Design System ─────────────────────────────────────── */
+@theme {
+  --color-brand-50: #F6F6F6;
+  --color-brand-100: #ECECEC;
+  --color-brand-200: #D4D4D4;
+
+  /* Greens */
+  --color-green-primary: #1C6F45;
+  --color-green-dark: #155C39;
+  --color-green-light: #74D4A3;
+  --color-green-mint: #C8F1D6;
+
+  /* Neutrals */
+  --color-navy-900: #121212;
+  --color-gray-500: #8A8A8A;
+  --color-gray-300: #B0B0B0;
+  --color-gray-100: #F0F0F0;
+  --color-white: #FFFFFF;
+
+  /* Status */
+  --color-status-completed: #1C6F45;
+  --color-status-progress: #74D4A3;
+  --color-status-pending: #E8A838;
+
+  /* Font */
+  --font-sans: "Poppins", system-ui, sans-serif;
+  --font-display: "Poppins", system-ui, sans-serif;
+
+  /* Shadows */
+  --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.05);
+
+  /* Radii */
+  --radius-card: 22px;
+  --radius-container: 32px;
+  --radius-pill: 999px;
+  --radius-input: 999px;
+}
+
+/* ── Base ──────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: "Poppins", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #F6F6F6;
+  color: #121212;
+}
+
+::selection {
+  background: #C8F1D6;
+  color: #155C39;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #D4D4D4;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #B0B0B0;
+}
+
+/* ── Recharts overrides ────────────────────────────────── */
+.recharts-default-tooltip {
+  border-radius: 12px !important;
+  border: none !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08) !important;
+}
