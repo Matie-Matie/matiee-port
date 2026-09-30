@@ -1,252 +1,202 @@
-import { useState, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Plus, Trash2, ChevronRight, Pencil, Camera } from 'lucide-react';
+import { ArrowUpRight, ExternalLink, Pencil, Plus, Search, Trash2, Users } from 'lucide-react';
 import { useMatieeStore } from '../store/matieeStore';
-import PageHeader from '../components/PageHeader';
-import Reveal from '../components/Reveal';
-import Modal from '../components/Modal';
-import EmptyState from '../components/EmptyState';
+import { projectFinance } from '../lib/finance';
+import { R } from '../routes';
+import { fadeUp, stagger } from '../lib/motion';
+import { PageHeader } from '../ui/PageHeader';
+import { Button, IconButton } from '../ui/Button';
+import { Card } from '../ui/Card';
+import { Avatar } from '../ui/Avatar';
+import { Badge } from '../ui/Badge';
+import { EmptyState } from '../ui/EmptyState';
+import { Input } from '../ui/Field';
+import { Money } from '../ui/Money';
+import Modal from '../ui/Modal';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { toast } from '../ui/toast';
+import PrivateText from '../components/PrivateText';
+import { usePrivacy } from '../lib/usePrivacy';
+import { ClientFields } from '../components/ClientForm';
+import { clientFormFrom, emptyClientForm, type ClientFormState } from '../components/clientFormState';
 
 export default function Clients() {
-  const navigate = useNavigate();
+  const { name: pname } = usePrivacy();
   const clients = useMatieeStore((s) => s.clients);
   const projects = useMatieeStore((s) => s.projects);
   const addClient = useMatieeStore((s) => s.addClient);
   const updateClient = useMatieeStore((s) => s.updateClient);
   const deleteClient = useMatieeStore((s) => s.deleteClient);
 
+  const [params, setParams] = useSearchParams();
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingClient, setEditingClient] = useState<string | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-  const [form, setForm] = useState({ name: '', contact: '', email: '', notes: '', photo: '' });
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [form, setForm] = useState<ClientFormState>(emptyClientForm);
+  const [query, setQuery] = useState('');
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setForm({ ...form, photo: reader.result as string });
-    };
-    reader.readAsDataURL(file);
-  };
+  // Deep link from Quick add / command palette: /app/clients?new=1
+  useEffect(() => {
+    if (params.get('new')) {
+      setForm(emptyClientForm);
+      setEditingId(null);
+      setModalOpen(true);
+      params.delete('new');
+      setParams(params, { replace: true });
+    }
+  }, [params, setParams]);
 
-  const handleAdd = () => {
-    if (!form.name.trim()) return;
-    addClient({ name: form.name.trim(), contact: form.contact.trim(), email: form.email.trim(), notes: form.notes.trim(), photo: form.photo || undefined });
-    setForm({ name: '', contact: '', email: '', notes: '', photo: '' });
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return clients
+      .filter((c) => !q || `${c.name} ${c.email} ${c.contact}`.toLowerCase().includes(q))
+      .map((c) => {
+        const mine = projects.filter((p) => p.clientId === c.id);
+        const fin = projectFinance(mine);
+        return { c, count: mine.length, active: mine.filter((p) => p.status === 'in-progress').length, billed: fin.pipelineValue, outstanding: fin.outstanding };
+      });
+  }, [clients, projects, query]);
+
+  const open = modalOpen || editingId !== null;
+  const closeModal = () => {
     setModalOpen(false);
+    setEditingId(null);
+    setForm(emptyClientForm);
   };
 
-  const handleEdit = (client: typeof clients[0]) => {
-    setForm({ name: client.name, contact: client.contact, email: client.email, notes: client.notes, photo: client.photo || '' });
-    setEditingClient(client.id);
-  };
+  function save() {
+    if (!form.name.trim()) return;
+    const data = { name: form.name.trim(), contact: form.contact.trim(), email: form.email.trim(), notes: form.notes.trim(), photo: form.photo || undefined };
+    if (editingId) {
+      updateClient(editingId, data);
+      toast('Client updated', 'success');
+    } else {
+      addClient(data);
+      toast('Client added', 'success');
+    }
+    closeModal();
+  }
 
-  const handleSaveEdit = () => {
-    if (!form.name.trim() || !editingClient) return;
-    updateClient(editingClient, { name: form.name.trim(), contact: form.contact.trim(), email: form.email.trim(), notes: form.notes.trim(), photo: form.photo || undefined });
-    setForm({ name: '', contact: '', email: '', notes: '', photo: '' });
-    setEditingClient(null);
-  };
-
-  const isEditing = editingClient !== null;
-  const editingTitle = isEditing
-    ? `Edit ${clients.find((c) => c.id === editingClient)?.name || 'Client'}`
-    : 'New Client';
-
-  const getProjectCount = (clientId: string) =>
-    projects.filter((p) => p.clientId === clientId).length;
+  const toDelete = clients.find((c) => c.id === deleteId);
+  const linked = toDelete ? projects.filter((p) => p.clientId === toDelete.id).length : 0;
 
   return (
     <div>
       <PageHeader
-        badge="Clients"
-        title="Your Roster"
-        description={`${clients.length} client${clients.length !== 1 ? 's' : ''} on board.`}
-        action={
-          <button
-            onClick={() => setModalOpen(true)}
-            className="flex items-center gap-2 h-12 px-6 bg-green-primary hover:bg-green-dark text-white text-sm font-medium rounded-full transition-all duration-200 shadow-sm hover:shadow-md"
-          >
-            <Plus size={18} />
-            Add Client
-          </button>
+        eyebrow="Clients"
+        title="Your roster"
+        description={`${clients.length} client${clients.length === 1 ? '' : 's'} on board, ${projects.length} project${projects.length === 1 ? '' : 's'} between them.`}
+        actions={
+          <Button size="lg" trailing={<Plus size={16} strokeWidth={2} />} onClick={() => { setForm(emptyClientForm); setModalOpen(true); }}>
+            Add client
+          </Button>
         }
       />
 
-      {/* Client List */}
-      <div className="space-y-3">
-        {clients.length === 0 ? (
-          <Reveal y={20} delay={0.1}>
-            <EmptyState
-              icon="🤝"
-              title="No clients yet"
-              description="Tap 'Add Client' to get started."
-              action={
-                <button
-                  onClick={() => setModalOpen(true)}
-                  className="flex items-center gap-2 h-12 px-6 bg-green-primary hover:bg-green-dark text-white text-sm font-medium rounded-full transition-all duration-200"
-                >
-                  <Plus size={18} />
-                  Add Client
-                </button>
-              }
-            />
-          </Reveal>
-        ) : (
-          clients.map((client, i) => (
-            <Reveal key={client.id} y={20} delay={0.04 * i} duration={0.4}>
-              <motion.div
-                whileHover={{ scale: 1.005, x: 3 }}
-                whileTap={{ scale: 0.995 }}
-                className="group flex items-center justify-between p-4 md:p-5 bg-white rounded-[22px] shadow-card cursor-pointer transition-all duration-200"
-                onClick={() => navigate(`/clients/${client.id}`)}
-              >
-                  <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-full overflow-hidden flex-shrink-0 bg-gradient-to-br from-green-primary to-green-dark">
-                    {client.photo ? (
-                      <img src={client.photo} alt={client.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-white text-sm font-semibold">
-                        {client.name.charAt(0).toUpperCase()}
-                      </div>
+      {clients.length > 6 && (
+        <div className="relative mb-5 max-w-sm">
+          <Search size={16} strokeWidth={1.5} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-mute" />
+          <Input aria-label="Search clients" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search clients" className="pl-10" />
+        </div>
+      )}
+
+      {clients.length === 0 ? (
+        <Card bezel pad="none">
+          <EmptyState
+            icon={Users}
+            title="No clients yet"
+            description="Add the people you work with — projects, payments and notes hang off each client."
+            action={<Button trailing={<Plus size={16} strokeWidth={2} />} onClick={() => setModalOpen(true)}>Add your first client</Button>}
+          />
+        </Card>
+      ) : rows.length === 0 ? (
+        <EmptyState compact icon={Search} title={`No client matches “${query}”`} description="Try a different name or email." />
+      ) : (
+        <motion.ul variants={stagger(0.05)} initial="hidden" animate="show" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {rows.map(({ c, count, active, billed, outstanding }) => (
+            <motion.li key={c.id} variants={fadeUp} className="min-w-0 [&>*]:h-full">
+              <Card bezel spotlight pad="md" className="group">
+                <div className="flex items-start gap-3">
+                  <Avatar name={c.name} photo={c.photo} size={48} />
+                  <div className="min-w-0 flex-1">
+                    <h3 className="truncate text-[15px] font-semibold tracking-tight text-ink">
+                      <Link to={R.client(c.id)} className="after:absolute after:inset-0 after:content-['']">
+                        <PrivateText type="name">{c.name}</PrivateText>
+                      </Link>
+                    </h3>
+                    <p className="truncate text-xs text-mute">{c.email ? <PrivateText type="name">{c.email}</PrivateText> : c.contact ? 'Has contact link' : 'No contact details'}</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 flex items-center gap-2">
+                  <Badge tone={count ? 'brand' : 'neutral'} dot>{count} project{count === 1 ? '' : 's'}</Badge>
+                  {active > 0 && <Badge tone="sand">{active} active</Badge>}
+                  <div className="relative z-10 ml-auto flex items-center gap-1">
+                    {c.contact && (
+                      <a
+                        href={c.contact.startsWith('http') ? c.contact : `https://${c.contact}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`Open ${pname(c.name)}'s contact link`}
+                        className="flex h-8 w-8 items-center justify-center rounded-full text-mute transition-colors hover:bg-ink/[0.06] hover:text-ink"
+                      >
+                        <ExternalLink size={14} strokeWidth={1.6} />
+                      </a>
                     )}
+                    <span className="flex gap-1 md:opacity-0 md:transition-opacity md:duration-300 md:focus-within:opacity-100 md:group-hover:opacity-100">
+                      <IconButton size="sm" tone="soft" label={`Edit ${pname(c.name)}`} onClick={() => { setForm(clientFormFrom(c)); setEditingId(c.id); }}>
+                        <Pencil size={14} strokeWidth={1.75} />
+                      </IconButton>
+                      <IconButton size="sm" tone="danger" label={`Delete ${pname(c.name)}`} onClick={() => setDeleteId(c.id)}>
+                        <Trash2 size={14} strokeWidth={1.75} />
+                      </IconButton>
+                    </span>
+                  </div>
+                </div>
+
+                <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-ink/[0.07] pt-4">
+                  <div>
+                    <dt className="text-[11px] text-mute">Billed</dt>
+                    <dd className="text-[15px] font-semibold tracking-tight text-ink"><Money value={billed} /></dd>
                   </div>
                   <div>
-                    <p className="text-sm font-semibold text-navy-900">{client.name}</p>
-                    <p className="text-xs text-gray-500">
-                      {getProjectCount(client.id)} project{getProjectCount(client.id) !== 1 ? 's' : ''}
-                      {client.contact && ` · ${client.contact}`}
-                    </p>
+                    <dt className="text-[11px] text-mute">Outstanding</dt>
+                    <dd className={`text-[15px] font-semibold tracking-tight ${outstanding > 0 ? 'text-warn-700' : 'text-ink'}`}><Money value={outstanding} /></dd>
                   </div>
-                </div>
+                </dl>
+                <ArrowUpRight size={16} strokeWidth={1.6} className="absolute bottom-5 right-5 text-faint opacity-0 transition-[opacity,transform] duration-500 ease-matie group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:opacity-100" />
+              </Card>
+            </motion.li>
+          ))}
+        </motion.ul>
+      )}
 
-                <div className="flex items-center gap-3">
-                  {getProjectCount(client.id) > 0 && (
-                    <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-green-mint/50 text-green-dark">
-                      {getProjectCount(client.id)}
-                    </span>
-                  )}
-
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleEdit(client); }}
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-gray-300 opacity-0 group-hover:opacity-100 hover:text-green-primary hover:bg-green-mint/30 transition-all duration-200"
-                  >
-                    <Pencil size={13} />
-                  </button>
-
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setDeleteConfirm(client.id); }}
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-gray-300 opacity-0 group-hover:opacity-100 hover:text-status-red hover:bg-red-50 transition-all duration-200"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-
-                  <ChevronRight size={16} className="text-gray-300 group-hover:text-gray-500 transition-colors" />
-                </div>
-              </motion.div>
-            </Reveal>
-          ))
-        )}
-      </div>
-
-      {/* ── Add / Edit Client Modal ── */}
-      <Modal open={modalOpen || isEditing} onClose={() => { setModalOpen(false); setEditingClient(null); setForm({ name: '', contact: '', email: '', notes: '', photo: '' }); }} title={editingTitle}>
-        <div className="flex flex-col gap-4">
-          {/* Photo Upload */}
-          <div className="flex items-center gap-4">
-            <div
-              onClick={() => fileInputRef.current?.click()}
-              className="relative w-16 h-16 rounded-full overflow-hidden bg-gradient-to-br from-green-primary to-green-dark flex-shrink-0 cursor-pointer group ring-2 ring-brand-100 hover:ring-green-mint transition-all"
-            >
-              {form.photo ? (
-                <img src={form.photo} alt="Preview" className="w-full h-full object-cover" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-white text-lg font-bold">
-                  {form.name ? form.name.charAt(0).toUpperCase() : '?'}
-                </div>
-              )}
-              <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity rounded-full">
-                <Camera size={16} className="text-white" />
-              </div>
-            </div>
-            <div className="text-xs text-gray-500">
-              <button onClick={() => fileInputRef.current?.click()} className="font-medium text-green-primary hover:text-green-dark transition-colors">Upload photo</button>
-              {form.photo && (
-                <button onClick={() => setForm({ ...form, photo: '' })} className="font-medium text-gray-400 hover:text-status-red transition-colors ml-3">Remove</button>
-              )}
-              <p className="mt-0.5">PNG, JPG up to 2MB</p>
-            </div>
-            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileSelect} className="hidden" />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1.5">
-              Client Name <span className="text-green-primary">*</span>
-            </label>
-            <input
-              autoFocus
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              onKeyDown={(e) => e.key === 'Enter' && (isEditing ? handleSaveEdit() : handleAdd())}
-              placeholder="e.g. Juan Dela Cruz"
-              className="w-full h-12 px-5 bg-brand-50 rounded-[999px] text-sm text-navy-900 placeholder:text-gray-300 outline-none focus:ring-2 focus:ring-green-mint transition-all"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1.5">Where to Contact?</label>
-            <input
-              value={form.contact}
-              onChange={(e) => setForm({ ...form, contact: e.target.value })}
-              placeholder="FB, Instagram (paste link)"
-              className="w-full h-12 px-5 bg-brand-50 rounded-[999px] text-sm text-navy-900 placeholder:text-gray-300 outline-none focus:ring-2 focus:ring-green-mint transition-all"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1.5">Email</label>
-            <input
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
-              placeholder="email@"
-              className="w-full h-12 px-5 bg-brand-50 rounded-[999px] text-sm text-navy-900 placeholder:text-gray-300 outline-none focus:ring-2 focus:ring-green-mint transition-all"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1.5">Notes</label>
-            <textarea
-              value={form.notes}
-              onChange={(e) => setForm({ ...form, notes: e.target.value })}
-              placeholder="e.g. Prescription system — downpayment ₱5k..."
-              rows={2}
-              className="w-full px-5 py-3 bg-brand-50 rounded-2xl text-sm text-navy-900 placeholder:text-gray-300 outline-none focus:ring-2 focus:ring-green-mint transition-all resize-none"
-            />
-          </div>
-
-          <div className="flex gap-2 pt-2">
-            <button onClick={() => { setModalOpen(false); setEditingClient(null); setForm({ name: '', contact: '', email: '', notes: '', photo: '' }); }} className="flex-1 h-12 rounded-full text-sm font-medium text-gray-500 ring-1 ring-brand-100 hover:ring-gray-300 transition-all">Cancel</button>
-            <button onClick={isEditing ? handleSaveEdit : handleAdd} disabled={!form.name.trim()} className="flex-1 h-12 rounded-full text-sm font-medium bg-green-primary text-white hover:bg-green-dark transition-all disabled:opacity-40 flex items-center justify-center gap-2">
-              {isEditing ? <Pencil size={16} /> : <Plus size={16} />}
-              {isEditing ? 'Save Changes' : 'Add Client'}
-            </button>
-          </div>
-        </div>
+      <Modal
+        open={open}
+        onClose={closeModal}
+        title={editingId ? 'Edit client' : 'New client'}
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeModal}>Cancel</Button>
+            <Button onClick={save} disabled={!form.name.trim()}>{editingId ? 'Save changes' : 'Add client'}</Button>
+          </>
+        }
+      >
+        <ClientFields value={form} onChange={setForm} onSubmit={save} />
       </Modal>
 
-      {/* ── Delete Confirm Modal ── */}
-      <Modal open={deleteConfirm !== null} onClose={() => setDeleteConfirm(null)} title="Delete Client?">
-        <p className="text-sm text-gray-500 mb-6">
-          This will also remove all projects, payments, and notes linked to this client.
-        </p>
-        <div className="flex gap-2">
-          <button onClick={() => setDeleteConfirm(null)} className="flex-1 h-12 rounded-full text-sm font-medium text-gray-500 ring-1 ring-brand-100 hover:ring-gray-300 transition-all">Cancel</button>
-          <button onClick={() => { if (deleteConfirm) deleteClient(deleteConfirm); setDeleteConfirm(null); }} className="flex-1 h-12 rounded-full text-sm font-medium bg-status-red text-white hover:bg-red-600 transition-all">Delete</button>
-        </div>
-      </Modal>
+      <ConfirmDialog
+        open={deleteId !== null}
+        onClose={() => setDeleteId(null)}
+        title={`Delete ${toDelete ? pname(toDelete.name) : 'client'}?`}
+        description={linked ? `This also removes ${linked} project${linked === 1 ? '' : 's'}, their payments and notes. This can't be undone.` : "This removes the client and their notes. This can't be undone."}
+        onConfirm={() => {
+          if (deleteId) deleteClient(deleteId);
+          toast('Client deleted');
+        }}
+      />
     </div>
   );
 }

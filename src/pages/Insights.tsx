@@ -1,316 +1,244 @@
-import { useMemo, useState } from 'react';
-import { motion } from 'framer-motion';
-import {
-  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
-} from 'recharts';
-import { TrendingUp, Wallet, CalendarCheck, Trophy } from 'lucide-react';
+import { useMemo, useState, type ReactNode } from 'react';
+import { motion, useReducedMotion } from 'framer-motion';
+import { Area, AreaChart, Bar as RBar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { CalendarCheck, LineChart as LineIcon, Trophy, TrendingDown, TrendingUp } from 'lucide-react';
 import { useMatieeStore } from '../store/matieeStore';
-import Reveal from '../components/Reveal';
-import PrivateText from '../components/PrivateText';
 import { ATTENDANCE_RATE_FACTOR } from '../types';
+import { pesoCompact } from '../lib/format';
+import { fadeUp, stagger } from '../lib/motion';
+import { cn } from '../lib/cn';
+import { PageHeader } from '../ui/PageHeader';
+import { Card, CardHeader } from '../ui/Card';
+import { Bar } from '../ui/Progress';
+import { EmptyState } from '../ui/EmptyState';
+import { Money } from '../ui/Money';
+import { Segmented } from '../ui/Segmented';
+import { ChartTooltip } from '../ui/chart';
+import { CHART } from '../ui/chartTheme';
+import { usePrivacy } from '../lib/usePrivacy';
+import PrivateText from '../components/PrivateText';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const PIE_COLORS = ['#1C6F45', '#74D4A3', '#E8A838', '#F87171', '#60A5FA', '#A78BFA', '#F472B6', '#94A3B8'];
+const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+const sum = (xs: { amount: number }[]) => xs.reduce((s, x) => s + x.amount, 0);
+type Range = '3' | '6' | '12';
 
-function fmt(n: number) {
-  return '₱' + n.toLocaleString('en-US', { maximumFractionDigits: 0 });
-}
-
-function monthKey(d: Date) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
+const axisMoney = (v: number | string) => pesoCompact(Number(v)).replace('₱', '');
 
 export default function Insights() {
+  const reduce = useReducedMotion();
+  const { on: hide, name: pname } = usePrivacy();
   const transactions = useMatieeStore((s) => s.transactions);
   const attendance = useMatieeStore((s) => s.attendance);
   const dailyRate = useMatieeStore((s) => s.dailyRate);
   const projects = useMatieeStore((s) => s.projects);
   const payments = useMatieeStore((s) => s.payments);
   const clients = useMatieeStore((s) => s.clients);
+  const [range, setRange] = useState<Range>('6');
+  const n = Number(range);
 
-  const [range, setRange] = useState(6);
-
-  // ── Monthly cashflow (income vs expense) ──
-  const cashflow = useMemo(() => {
-    const months: { label: string; Income: number; Expense: number }[] = [];
+  const months = useMemo(() => {
     const now = new Date();
-    for (let i = range - 1; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = monthKey(d);
-      const income = transactions.filter((t) => t.type === 'income' && t.date.slice(0, 7) === key).reduce((s, t) => s + t.amount, 0);
-      const expense = transactions.filter((t) => t.type === 'expense' && t.date.slice(0, 7) === key).reduce((s, t) => s + t.amount, 0);
-      months.push({ label: MONTHS[d.getMonth()], Income: income, Expense: expense });
-    }
-    return months;
-  }, [transactions, range]);
+    return Array.from({ length: n }, (_, i) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - (n - 1 - i), 1);
+      return { key: monthKey(d), label: MONTHS[d.getMonth()] };
+    });
+  }, [n]);
 
-  // ── Expense by category (all time) ──
+  const cashflow = useMemo(
+    () => months.map((m) => {
+      const tx = transactions.filter((t) => t.date.slice(0, 7) === m.key);
+      return { label: m.label, Income: sum(tx.filter((t) => t.type === 'income')), Expenses: sum(tx.filter((t) => t.type === 'expense')) };
+    }),
+    [months, transactions],
+  );
+
+  const workDays = useMemo(
+    () => months.map((m) => ({
+      label: m.label,
+      Days: attendance.filter((a) => a.date.slice(0, 7) === m.key).reduce((s, a) => s + ATTENDANCE_RATE_FACTOR[a.status], 0),
+    })),
+    [months, attendance],
+  );
+
+  const paymentTrend = useMemo(
+    () => months.map((m) => ({ label: m.label, Payments: sum(payments.filter((p) => p.date && p.date.slice(0, 7) === m.key)) })),
+    [months, payments],
+  );
+
   const expensePie = useMemo(() => {
     const map = new Map<string, number>();
-    transactions.filter((t) => t.type === 'expense').forEach((t) => {
-      map.set(t.category, (map.get(t.category) || 0) + t.amount);
-    });
+    transactions.filter((t) => t.type === 'expense').forEach((t) => map.set(t.category, (map.get(t.category) ?? 0) + t.amount));
     return [...map.entries()].map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 8);
   }, [transactions]);
 
-  // ── Attendance per month (last `range` months) ──
-  const attendanceByMonth = useMemo(() => {
-    const months: { label: string; Worked: number; Earned: number }[] = [];
-    const now = new Date();
-    for (let i = range - 1; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = monthKey(d);
-      const worked = attendance
-        .filter((a) => a.date.slice(0, 7) === key)
-        .reduce((s, a) => s + ATTENDANCE_RATE_FACTOR[a.status], 0);
-      months.push({ label: MONTHS[d.getMonth()], Worked: worked, Earned: Math.round(worked * dailyRate) });
-    }
-    return months;
-  }, [attendance, range, dailyRate]);
-
-  // ── Top clients by total fee ──
   const topClients = useMemo(() => {
     const map = new Map<string, number>();
     projects.forEach((p) => {
-      const client = clients.find((c) => c.id === p.clientId);
-      const name = client?.name || 'Unknown';
-      map.set(name, (map.get(name) || 0) + p.fee);
+      const name = clients.find((c) => c.id === p.clientId)?.name ?? 'Unknown';
+      map.set(name, (map.get(name) ?? 0) + p.fee);
     });
     return [...map.entries()].map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 5);
   }, [projects, clients]);
 
-  // ── Project payments over time ──
-  const paymentTrend = useMemo(() => {
-    const months: { label: string; Payments: number }[] = [];
-    const now = new Date();
-    for (let i = range - 1; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = monthKey(d);
-      const sum = payments.filter((p) => p.date && p.date.slice(0, 7) === key).reduce((s, p) => s + p.amount, 0);
-      months.push({ label: MONTHS[d.getMonth()], Payments: sum });
-    }
-    return months;
-  }, [payments, range]);
-
-  const totalEarned = attendance.reduce((s, a) => s + ATTENDANCE_RATE_FACTOR[a.status] * dailyRate, 0);
   const totalWorked = attendance.reduce((s, a) => s + ATTENDANCE_RATE_FACTOR[a.status], 0);
-  const totalIncome = transactions.filter((t) => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-  const totalExpense = transactions.filter((t) => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+  const totalEarned = totalWorked * dailyRate;
+  const totalIncome = sum(transactions.filter((t) => t.type === 'income'));
+  const totalExpense = sum(transactions.filter((t) => t.type === 'expense'));
+
+  const stats: { label: string; icon: typeof TrendingUp; node: ReactNode; sub: ReactNode }[] = [
+    { label: 'Work days', icon: CalendarCheck, node: <>{Math.floor(totalWorked)}<span className="ml-1 text-sm font-normal text-mute">days</span></>, sub: <>≈ <Money value={totalEarned} /> earned</> },
+    { label: 'Total income', icon: TrendingUp, node: <Money value={totalIncome} animate />, sub: 'All time' },
+    { label: 'Total expenses', icon: TrendingDown, node: <Money value={totalExpense} animate />, sub: 'All time' },
+    { label: 'Top client', icon: Trophy, node: <span className="block truncate text-[22px]"><PrivateText type="name">{topClients[0]?.name ?? '—'}</PrivateText></span>, sub: topClients[0] ? <><Money value={topClients[0].value} /> in projects</> : 'No projects yet' },
+  ];
+
+  const grid = { vertical: false, stroke: CHART.grid } as const;
+  const margin = { top: 4, right: 4, left: -8, bottom: 0 };
 
   return (
-    <div className="space-y-6">
-      {/* ── Header ── */}
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4"
-      >
-        <div>
-          <h1 className="text-[32px] md:text-[46px] font-bold text-navy-900 leading-none tracking-tight">Insights</h1>
-          <p className="text-sm text-gray-500 mt-2">See the patterns — money, work days, and clients.</p>
-        </div>
-        <div className="flex items-center gap-1 bg-white rounded-full p-1 shadow-sm">
-          {[3, 6, 12].map((r) => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${range === r ? 'bg-green-primary text-white' : 'text-gray-500 hover:text-navy-900'}`}
-            >
-              {r} mo
-            </button>
-          ))}
-        </div>
+    <div className="space-y-5">
+      <PageHeader
+        eyebrow="Insights"
+        title="See the patterns"
+        description="Money, work days and clients — over time."
+        actions={<Segmented<Range> ariaLabel="Time range" value={range} onChange={setRange} options={[{ value: '3', label: '3 months' }, { value: '6', label: '6 months' }, { value: '12', label: '12 months' }]} />}
+      />
+
+      <motion.div variants={stagger(0.06)} initial="hidden" animate="show" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {stats.map((s) => {
+          const Icon = s.icon;
+          return (
+            <motion.div key={s.label} variants={fadeUp} className="min-w-0 [&>*]:h-full">
+              <Card bezel spotlight pad="md">
+                <div className="mb-3 flex items-center gap-2.5">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-50 text-brand-600"><Icon size={17} strokeWidth={1.6} /></span>
+                  <p className="text-[13px] text-mute">{s.label}</p>
+                </div>
+                <p className="truncate text-[26px] font-semibold leading-none tracking-[-0.04em] text-ink">{s.node}</p>
+                <p className="mt-2 truncate text-xs text-mute">{s.sub}</p>
+              </Card>
+            </motion.div>
+          );
+        })}
       </motion.div>
 
-      {/* ── Top Stats ── */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.1 }}
-        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"
-      >
-        <div className="bg-white rounded-[22px] shadow-card p-5">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-9 h-9 rounded-xl bg-green-mint/40 flex items-center justify-center">
-              <CalendarCheck size={16} className="text-green-primary" />
-            </div>
-            <p className="text-sm text-gray-500">Total Work Days</p>
-          </div>
-          <p className="text-2xl font-bold text-navy-900">{Math.floor(totalWorked)}<span className="text-sm font-normal text-gray-400 ml-1">days</span></p>
-          <p className="text-[11px] text-gray-400 mt-1">≈ {fmt(totalEarned)} earned</p>
-        </div>
-        <div className="bg-white rounded-[22px] shadow-card p-5">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-9 h-9 rounded-xl bg-green-mint/40 flex items-center justify-center">
-              <TrendingUp size={16} className="text-green-primary" />
-            </div>
-            <p className="text-sm text-gray-500">Total Income</p>
-          </div>
-          <p className="text-2xl font-bold text-navy-900"><PrivateText>{fmt(totalIncome)}</PrivateText></p>
-        </div>
-        <div className="bg-white rounded-[22px] shadow-card p-5">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-9 h-9 rounded-xl bg-red-50 flex items-center justify-center">
-              <Wallet size={16} className="text-red-500" />
-            </div>
-            <p className="text-sm text-gray-500">Total Expenses</p>
-          </div>
-          <p className="text-2xl font-bold text-navy-900"><PrivateText>{fmt(totalExpense)}</PrivateText></p>
-        </div>
-        <div className="bg-white rounded-[22px] shadow-card p-5">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center">
-              <Trophy size={16} className="text-amber-500" />
-            </div>
-            <p className="text-sm text-gray-500">Top Client</p>
-          </div>
-          <p className="text-2xl font-bold text-navy-900 truncate">{topClients[0]?.name || '—'}</p>
-          {topClients[0] && <p className="text-[11px] text-gray-400 mt-1">{fmt(topClients[0].value)} in projects</p>}
-        </div>
-      </motion.div>
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+        <ChartCard title="Cash flow" description="Income vs expenses" empty={!cashflow.some((d) => d.Income || d.Expenses)} emptyLabel="Log income and expenses to see trends" legend={[['Income', CHART.brand], ['Expenses', CHART.clay]]}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={cashflow} barGap={4} margin={margin}>
+              <CartesianGrid {...grid} />
+              <XAxis dataKey="label" axisLine={false} tickLine={false} />
+              <YAxis axisLine={false} tickLine={false} tick={!hide} tickFormatter={axisMoney} width={hide ? 8 : 44} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgb(28 111 69 / 0.06)' }} />
+              <RBar dataKey="Income" fill={CHART.brand} radius={[7, 7, 0, 0]} maxBarSize={24} isAnimationActive={!reduce} />
+              <RBar dataKey="Expenses" fill={CHART.clay} radius={[7, 7, 0, 0]} maxBarSize={24} isAnimationActive={!reduce} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Cashflow chart */}
-        <Reveal y={15} duration={0.4}>
-          <div className="bg-white rounded-[22px] shadow-card p-5 md:p-6">
-            <h3 className="text-base font-semibold text-navy-900 mb-5">Cash Flow — Income vs Expenses</h3>
-            {cashflow.some((d) => d.Income > 0 || d.Expense > 0) ? (
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={cashflow} barGap={4}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#8A8A8A' }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: '#B0B0B0' }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${v / 1000}K` : String(v)} />
-                    <Tooltip formatter={(v) => fmt(Number(v))} contentStyle={{ borderRadius: 14, border: '1px solid #ECECEC', fontSize: 12, fontFamily: 'Poppins' }} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="Income" fill="#1C6F45" radius={[6, 6, 0, 0]} />
-                    <Bar dataKey="Expense" fill="#F87171" radius={[6, 6, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <EmptyChart label="Log income and expenses to see trends" />
-            )}
-          </div>
-        </Reveal>
-
-        {/* Expense pie */}
-        <Reveal y={15} duration={0.4}>
-          <div className="bg-white rounded-[22px] shadow-card p-5 md:p-6">
-            <h3 className="text-base font-semibold text-navy-900 mb-5">Expenses by Category</h3>
-            {expensePie.length > 0 ? (
-              <div className="h-64 flex items-center">
+        <Card bezel pad="md">
+          <CardHeader title="Where money goes" description="Expenses by category, all time" />
+          {expensePie.length === 0 ? (
+            <EmptyState compact icon={LineIcon} title="No expenses yet" description="Log an expense to see the split." />
+          ) : (
+            <div className="flex flex-col items-center gap-5 sm:flex-row">
+              <div className="relative h-[210px] w-[210px] shrink-0" role="img" aria-label="Donut chart of expenses by category">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
-                    <Pie data={expensePie} dataKey="value" nameKey="name" cx="45%" cy="50%" innerRadius={55} outerRadius={85} paddingAngle={2}>
-                      {expensePie.map((_, i) => (
-                        <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                      ))}
+                    <Pie data={expensePie} dataKey="value" nameKey="name" innerRadius={66} outerRadius={98} paddingAngle={3} cornerRadius={6} stroke="none" isAnimationActive={!reduce}>
+                      {expensePie.map((_, i) => <Cell key={i} fill={CHART.series[i % CHART.series.length]} />)}
                     </Pie>
-                    <Tooltip formatter={(v) => fmt(Number(v))} contentStyle={{ borderRadius: 14, border: '1px solid #ECECEC', fontSize: 12, fontFamily: 'Poppins' }} />
+                    <Tooltip content={<ChartTooltip />} />
                   </PieChart>
                 </ResponsiveContainer>
-                <div className="flex-1 space-y-2">
-                  {expensePie.slice(0, 5).map((e, i) => (
-                    <div key={e.name} className="flex items-center gap-2 text-xs">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                      <span className="text-gray-500 flex-1 truncate">{e.name}</span>
-                      <span className="font-semibold text-navy-900">{fmt(e.value)}</span>
-                    </div>
-                  ))}
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-[11px] text-mute">Total</span>
+                  <span className="text-lg font-semibold tracking-tight text-ink"><Money value={totalExpense} compact /></span>
                 </div>
               </div>
-            ) : (
-              <EmptyChart label="No expenses logged yet" />
-            )}
-          </div>
-        </Reveal>
+              <ul className="w-full min-w-0 flex-1 space-y-2.5">
+                {expensePie.slice(0, 6).map((e, i) => (
+                  <li key={e.name} className="flex items-center gap-2.5 text-[13px]">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: CHART.series[i % CHART.series.length] }} />
+                    <span className="flex-1 truncate text-ink-2">{e.name}</span>
+                    <span className="font-semibold text-ink"><Money value={e.value} /></span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Card>
 
-        {/* Attendance chart */}
-        <Reveal y={15} duration={0.4}>
-          <div className="bg-white rounded-[22px] shadow-card p-5 md:p-6">
-            <h3 className="text-base font-semibold text-navy-900 mb-5">Work Days per Month</h3>
-            {attendanceByMonth.some((d) => d.Worked > 0) ? (
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={attendanceByMonth}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#8A8A8A' }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: '#B0B0B0' }} axisLine={false} tickLine={false} allowDecimals={false} />
-                    <Tooltip formatter={(v, name) => (name === 'Earned' ? fmt(Number(v)) : `${v} days`)} contentStyle={{ borderRadius: 14, border: '1px solid #ECECEC', fontSize: 12, fontFamily: 'Poppins' }} />
-                    <Line type="monotone" dataKey="Worked" stroke="#1C6F45" strokeWidth={2.5} dot={{ r: 4, fill: '#1C6F45' }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <EmptyChart label="Mark your attendance to see the trend" />
-            )}
-          </div>
-        </Reveal>
+        <ChartCard title="Work days" description="Full and half days per month" empty={!workDays.some((d) => d.Days > 0)} emptyLabel="Mark your attendance to see the trend">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={workDays} margin={margin}>
+              <defs>
+                <linearGradient id="wd" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={CHART.brand} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={CHART.brand} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid {...grid} />
+              <XAxis dataKey="label" axisLine={false} tickLine={false} />
+              <YAxis axisLine={false} tickLine={false} allowDecimals={false} width={30} />
+              <Tooltip content={<ChartTooltip money={false} />} />
+              <Area type="monotone" dataKey="Days" stroke={CHART.brand} strokeWidth={2.5} fill="url(#wd)" dot={{ r: 4, fill: '#fff', stroke: CHART.brand, strokeWidth: 2 }} activeDot={{ r: 6 }} isAnimationActive={!reduce} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </ChartCard>
 
-        {/* Project payment trend */}
-        <Reveal y={15} duration={0.4}>
-          <div className="bg-white rounded-[22px] shadow-card p-5 md:p-6">
-            <h3 className="text-base font-semibold text-navy-900 mb-5">Project Payments Received</h3>
-            {paymentTrend.some((d) => d.Payments > 0) ? (
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={paymentTrend}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" vertical={false} />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#8A8A8A' }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: '#B0B0B0' }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${v / 1000}K` : String(v)} />
-                    <Tooltip formatter={(v) => fmt(Number(v))} contentStyle={{ borderRadius: 14, border: '1px solid #ECECEC', fontSize: 12, fontFamily: 'Poppins' }} />
-                    <Bar dataKey="Payments" fill="#E8A838" radius={[6, 6, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <EmptyChart label="Project payments will show here" />
-            )}
-          </div>
-        </Reveal>
+        <ChartCard title="Payments received" description="Logged on client projects" empty={!paymentTrend.some((d) => d.Payments > 0)} emptyLabel="Payments you log on projects will show here">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={paymentTrend} margin={margin}>
+              <CartesianGrid {...grid} />
+              <XAxis dataKey="label" axisLine={false} tickLine={false} />
+              <YAxis axisLine={false} tickLine={false} tick={!hide} tickFormatter={axisMoney} width={hide ? 8 : 44} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgb(28 111 69 / 0.06)' }} />
+              <RBar dataKey="Payments" fill={CHART.ochre} radius={[7, 7, 0, 0]} maxBarSize={30} isAnimationActive={!reduce} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
 
-        {/* Top clients */}
-        <Reveal y={15} duration={0.4}>
-          <div className="bg-white rounded-[22px] shadow-card p-5 md:p-6">
-            <h3 className="text-base font-semibold text-navy-900 mb-5">Top Clients by Project Value</h3>
-            {topClients.length > 0 ? (
-              <div className="space-y-4">
-                {topClients.map((c, i) => {
-                  const max = topClients[0]?.value || 1;
-                  const pct = (c.value / max) * 100;
-                  return (
-                    <div key={c.name}>
-                      <div className="flex items-center justify-between text-sm mb-1.5">
-                        <span className="flex items-center gap-2 text-gray-600">
-                          <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${i === 0 ? 'bg-amber-50 text-amber-600' : 'bg-brand-50 text-gray-500'}`}>{i + 1}</span>
-                          {c.name}
-                        </span>
-                        <span className="font-semibold text-navy-900">{fmt(c.value)}</span>
-                      </div>
-                      <div className="h-2 bg-brand-50 rounded-full overflow-hidden ml-8">
-                        <div className="h-full bg-gradient-to-r from-green-mint to-green-primary rounded-full" style={{ width: `${pct}%` }} />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <EmptyChart label="Add clients and projects to see rankings" />
-            )}
-          </div>
-        </Reveal>
+        <Card bezel pad="md" className="xl:col-span-2">
+          <CardHeader title="Top clients" description="By total project value" />
+          {topClients.length === 0 ? (
+            <EmptyState compact icon={Trophy} title="No rankings yet" description="Add clients and projects to see who matters most." />
+          ) : (
+            <ol className="space-y-4">
+              {topClients.map((c, i) => (
+                <li key={c.name}>
+                  <div className="mb-1.5 flex items-center justify-between gap-3 text-[13.5px]">
+                    <span className="flex min-w-0 items-center gap-3">
+                      <span className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold', i === 0 ? 'bg-warn-100 text-warn-700' : 'bg-ink/[0.06] text-mute')}>{i + 1}</span>
+                      <span className="truncate font-medium text-ink"><PrivateText type="name">{c.name}</PrivateText></span>
+                    </span>
+                    <span className="shrink-0 font-semibold text-ink"><Money value={c.value} /></span>
+                  </div>
+                  <div className="ml-9"><Bar value={(c.value / (topClients[0]?.value || 1)) * 100} height={6} label={`${pname(c.name)} share of top client`} /></div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </Card>
       </div>
     </div>
   );
 }
 
-function EmptyChart({ label }: { label: string }) {
+function ChartCard({ title, description, empty, emptyLabel, legend, children }: { title: string; description: string; empty: boolean; emptyLabel: string; legend?: [string, string][]; children: ReactNode }) {
   return (
-    <div className="h-64 flex flex-col items-center justify-center text-center">
-      <TrendingUp size={32} className="text-gray-300 mb-3" />
-      <p className="text-sm text-gray-500">{label}</p>
-    </div>
+    <Card bezel pad="md">
+      <CardHeader
+        title={title}
+        description={description}
+        action={legend && (
+          <div className="flex items-center gap-3 text-[11px] font-medium text-mute">
+            {legend.map(([l, c]) => <span key={l} className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: c }} />{l}</span>)}
+          </div>
+        )}
+      />
+      {empty ? <EmptyState compact icon={LineIcon} title="Nothing to chart yet" description={emptyLabel} /> : <div className="h-[240px]" role="img" aria-label={`${title} chart`}>{children}</div>}
+    </Card>
   );
 }

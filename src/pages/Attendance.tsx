@@ -1,61 +1,38 @@
-import { useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronLeft, ChevronRight, CalendarCheck, Pencil, RotateCcw, Briefcase, Check, X } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { AnimatePresence, motion } from 'framer-motion';
+import { CalendarCheck, Check, ChevronLeft, ChevronRight, Clock, Flag, Moon, Pencil, Plane, RotateCcw, X, type LucideIcon } from 'lucide-react';
 import { useMatieeStore } from '../store/matieeStore';
-import Reveal from '../components/Reveal';
-import type { AttendanceStatus } from '../types';
-import { ATTENDANCE_LABELS } from '../types';
+import { ATTENDANCE_LABELS, ATTENDANCE_RATE_FACTOR, type AttendanceStatus } from '../types';
+import { R } from '../routes';
+import { daysUntil, fmtDate, todayStr } from '../lib/format';
+import { EASE } from '../lib/motion';
+import { cn } from '../lib/cn';
+import { PageHeader } from '../ui/PageHeader';
+import { Button, IconButton } from '../ui/Button';
+import { Card, CardHeader } from '../ui/Card';
+import { Money } from '../ui/Money';
+import { MoneyInput } from '../ui/Field';
+import { Badge } from '../ui/Badge';
+import { toast } from '../ui/toast';
+import PrivateText from '../components/PrivateText';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
 const STATUS_ORDER: AttendanceStatus[] = ['worked', 'half-day', 'absent', 'rest', 'holiday', 'leave'];
 
-// Color coding per status
-const STATUS_STYLES: Record<AttendanceStatus, { cell: string; dot: string; chip: string }> = {
-  worked: {
-    cell: 'bg-green-mint text-green-dark font-bold',
-    dot: 'bg-green-primary',
-    chip: 'bg-green-mint text-green-dark',
-  },
-  'half-day': {
-    cell: 'bg-green-mint/50 text-green-dark font-semibold',
-    dot: 'bg-green-light',
-    chip: 'bg-green-mint/50 text-green-dark',
-  },
-  absent: {
-    cell: 'bg-red-100 text-red-700 font-bold',
-    dot: 'bg-red-500',
-    chip: 'bg-red-100 text-red-700',
-  },
-  rest: {
-    cell: 'bg-gray-100 text-gray-500',
-    dot: 'bg-gray-400',
-    chip: 'bg-gray-100 text-gray-500',
-  },
-  holiday: {
-    cell: 'bg-amber-50 text-amber-700',
-    dot: 'bg-amber-500',
-    chip: 'bg-amber-50 text-amber-700',
-  },
-  leave: {
-    cell: 'bg-blue-50 text-blue-700',
-    dot: 'bg-blue-500',
-    chip: 'bg-blue-50 text-blue-700',
-  },
+const STATUS_UI: Record<AttendanceStatus, { cell: string; dot: string; icon: LucideIcon }> = {
+  worked: { cell: 'bg-brand-600 text-white shadow-[0_6px_14px_-6px_rgb(28_111_69/0.7)]', dot: 'bg-brand-600', icon: Check },
+  'half-day': { cell: 'bg-brand-200 text-brand-900', dot: 'bg-brand-300', icon: Clock },
+  absent: { cell: 'bg-clay-100 text-clay-600', dot: 'bg-clay-500', icon: X },
+  rest: { cell: 'bg-ink/[0.06] text-mute', dot: 'bg-faint', icon: Moon },
+  holiday: { cell: 'bg-sand-200 text-ink-2', dot: 'bg-sand-300', icon: Flag },
+  leave: { cell: 'bg-warn-100 text-warn-700', dot: 'bg-warn-500', icon: Plane },
 };
 
-function fmt(n: number) {
-  return '₱' + n.toLocaleString('en-US', { maximumFractionDigits: 0 });
-}
-
-function toDateKey(year: number, month: number, day: number) {
-  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
+const key = (y: number, m: number, d: number) => `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
 export default function Attendance() {
-  const navigate = useNavigate();
   const projects = useMatieeStore((s) => s.projects);
   const clients = useMatieeStore((s) => s.clients);
   const attendance = useMatieeStore((s) => s.attendance);
@@ -64,366 +41,291 @@ export default function Attendance() {
   const clearAttendance = useMatieeStore((s) => s.clearAttendance);
   const setDailyRate = useMatieeStore((s) => s.setDailyRate);
 
-  const [currentDate, setCurrentDate] = useState(new Date());
-  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [cursor, setCursor] = useState(() => {
+    const n = new Date();
+    return { y: n.getFullYear(), m: n.getMonth() };
+  });
+  const [dir, setDir] = useState(1);
+  const [selected, setSelected] = useState<string | null>(null);
   const [editingRate, setEditingRate] = useState(false);
-  const [rateInput, setRateInput] = useState(String(dailyRate));
+  const [rateInput, setRateInput] = useState('');
 
-  const year = currentDate.getFullYear();
-  const month = currentDate.getMonth();
+  const { y, m } = cursor;
+  const today = todayStr();
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const firstDow = new Date(y, m, 1).getDay();
 
-  const prevMonth = () => setCurrentDate(new Date(year, month - 1, 1));
-  const nextMonth = () => setCurrentDate(new Date(year, month + 1, 1));
-  const today = () => setCurrentDate(new Date());
+  const byDate = useMemo(() => new Map(attendance.map((a) => [a.date, a.status])), [attendance]);
+  const deadlineDates = useMemo(() => new Set(projects.filter((p) => p.deadline && p.status !== 'completed').map((p) => p.deadline.slice(0, 10))), [projects]);
 
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstDayOfWeek = new Date(year, month, 1).getDay();
-  const lastDayOfPrevMonth = new Date(year, month, 0).getDate();
-
-  // Build calendar cells
-  const cells: (number | null)[] = [];
-  for (let i = firstDayOfWeek - 1; i >= 0; i--) cells.push(lastDayOfPrevMonth - i);
-  for (let i = 1; i <= daysInMonth; i++) cells.push(i);
-  const remaining = 42 - cells.length;
-  for (let i = 1; i <= remaining; i++) cells.push(i);
-
-  // Attendance map for the visible month
-  const monthAttendance = useMemo(() => {
-    const map = new Map<string, AttendanceStatus>();
-    attendance.forEach((a) => {
-      const [y, m] = a.date.split('-').map(Number);
-      if (y === year && m === month + 1) map.set(a.date, a.status);
-    });
-    return map;
-  }, [attendance, year, month]);
-
-  // Month stats
-  const monthStats = useMemo(() => {
-    let worked = 0;
-    let halfDays = 0;
-    let absent = 0;
+  const stats = useMemo(() => {
+    let worked = 0, half = 0, absent = 0, marked = 0;
     for (let d = 1; d <= daysInMonth; d++) {
-      const status = monthAttendance.get(toDateKey(year, month, d));
-      if (status === 'worked') worked++;
-      if (status === 'half-day') halfDays++;
-      if (status === 'absent') absent++;
+      const s = byDate.get(key(y, m, d));
+      if (!s) continue;
+      marked++;
+      if (s === 'worked') worked++;
+      if (s === 'half-day') half++;
+      if (s === 'absent') absent++;
     }
-    const expected = (worked + halfDays * 0.5) * dailyRate;
-    return { worked, halfDays, absent, expected };
-  }, [monthAttendance, daysInMonth, year, month, dailyRate]);
+    return { worked, half, absent, marked, expected: (worked * ATTENDANCE_RATE_FACTOR.worked + half * ATTENDANCE_RATE_FACTOR['half-day']) * dailyRate };
+  }, [byDate, daysInMonth, y, m, dailyRate]);
 
-  // Selected date record
-  const selectedRecord = selectedDate ? attendance.find((a) => a.date === selectedDate) : undefined;
-  const selectedDeadlines = selectedDate ? projects.filter((p) => p.deadline && p.deadline.slice(0, 10) === selectedDate && p.status !== 'completed') : [];
+  function go(delta: number) {
+    setDir(delta);
+    const d = new Date(y, m + delta, 1);
+    setCursor({ y: d.getFullYear(), m: d.getMonth() });
+    setSelected(null);
+  }
+  function goToday() {
+    const n = new Date();
+    setDir(n.getFullYear() * 12 + n.getMonth() >= y * 12 + m ? 1 : -1);
+    setCursor({ y: n.getFullYear(), m: n.getMonth() });
+    setSelected(today);
+  }
 
-  const isToday = (day: number) => {
-    const t = new Date();
-    return day === t.getDate() && month === t.getMonth() && year === t.getFullYear();
-  };
+  function setStatus(s: AttendanceStatus) {
+    if (!selected) return;
+    setAttendance(selected, s);
+    setSelected(null);
+  }
 
-  const handleSetStatus = (status: AttendanceStatus) => {
-    if (!selectedDate) return;
-    setAttendance(selectedDate, status);
-    setSelectedDate(null);
-  };
-
-  const handleClear = () => {
-    if (!selectedDate) return;
-    clearAttendance(selectedDate);
-    setSelectedDate(null);
-  };
-
-  const saveRate = () => {
-    const val = parseFloat(rateInput);
-    if (!isNaN(val) && val > 0) setDailyRate(val);
+  function saveRate() {
+    const v = parseFloat(rateInput);
+    if (!Number.isNaN(v) && v > 0) {
+      setDailyRate(v);
+      toast('Daily rate updated', 'success');
+    }
     setEditingRate(false);
-  };
+  }
 
-  // Upcoming deadlines (sorted) for side panel
-  const upcoming = [...projects]
-    .filter((p) => p.deadline && p.status !== 'completed')
-    .sort((a, b) => new Date(a.deadline).getTime() - new Date(b.deadline).getTime())
-    .slice(0, 5);
+  const todayStatus = byDate.get(today);
+  const selectedStatus = selected ? byDate.get(selected) : undefined;
+  const selectedDeadlines = selected ? projects.filter((p) => p.deadline?.slice(0, 10) === selected && p.status !== 'completed') : [];
+  const upcoming = useMemo(
+    () => [...projects].filter((p) => p.deadline && p.status !== 'completed').sort((a, b) => new Date(a.deadline).getTime() - new Date(b.deadline).getTime()).slice(0, 5),
+    [projects],
+  );
+  const selectedLabel = selected ? new Date(+selected.slice(0, 4), +selected.slice(5, 7) - 1, +selected.slice(8, 10)).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }) : '';
 
   return (
     <div>
-      <motion.h1
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="text-[32px] md:text-[46px] font-bold text-navy-900 leading-none tracking-tight mb-2"
-      >
-        Attendance
-      </motion.h1>
-      <motion.p
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.05 }}
-        className="text-sm text-gray-500 mb-8"
-      >
-        Mark your work days and watch your expected salary grow. 💸
-      </motion.p>
+      <PageHeader
+        eyebrow="Attendance"
+        title="Work days & salary"
+        description="Mark the days you worked and watch your expected salary build up."
+        actions={
+          <Button
+            size="lg"
+            variant={todayStatus === 'worked' ? 'soft' : 'primary'}
+            leading={todayStatus === 'worked' ? <Check size={16} strokeWidth={2.25} /> : <CalendarCheck size={16} strokeWidth={1.75} />}
+            onClick={() => {
+              if (todayStatus === 'worked') return;
+              setAttendance(today, 'worked');
+              toast('Marked today as worked', 'success');
+            }}
+            disabled={todayStatus === 'worked'}
+          >
+            {todayStatus === 'worked' ? 'Today is marked' : 'Mark today as worked'}
+          </Button>
+        }
+      />
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* ── Calendar Grid ── */}
-        <div className="lg:col-span-2 bg-white rounded-[22px] shadow-card p-5 md:p-6">
-          {/* Month Header */}
-          <div className="flex items-center justify-between mb-6">
-            <button onClick={prevMonth} className="w-9 h-9 rounded-full flex items-center justify-center text-gray-400 hover:text-navy-900 hover:bg-brand-50 transition-all">
-              <ChevronLeft size={18} />
-            </button>
-            <div className="flex items-center gap-3">
-              <h2 className="text-lg font-bold text-navy-900">{MONTHS[month]} {year}</h2>
-              <button onClick={today} className="text-[11px] font-semibold px-3 py-1.5 rounded-full bg-green-mint/50 text-green-dark hover:bg-green-mint transition-all">
-                Today
-              </button>
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <Card bezel pad="none">
+          <div className="p-5 md:p-7">
+            <div className="mb-6 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <h2 className="text-[22px] font-semibold tracking-[-0.03em] text-ink">
+                  {MONTHS[m]} <span className="font-normal text-mute">{y}</span>
+                </h2>
+                <Button variant="soft" size="sm" onClick={goToday}>Today</Button>
+              </div>
+              <div className="flex gap-1.5">
+                <IconButton label="Previous month" onClick={() => go(-1)}><ChevronLeft size={17} strokeWidth={1.75} /></IconButton>
+                <IconButton label="Next month" onClick={() => go(1)}><ChevronRight size={17} strokeWidth={1.75} /></IconButton>
+              </div>
             </div>
-            <button onClick={nextMonth} className="w-9 h-9 rounded-full flex items-center justify-center text-gray-400 hover:text-navy-900 hover:bg-brand-50 transition-all">
-              <ChevronRight size={18} />
-            </button>
-          </div>
 
-          {/* Day Headers */}
-          <div className="grid grid-cols-7 mb-2">
-            {DAYS.map((d) => (
-              <div key={d} className="text-center text-[11px] font-semibold text-gray-400 py-2">{d}</div>
-            ))}
-          </div>
+            <div className="mb-2 grid grid-cols-7">
+              {DAYS.map((d) => (
+                <div key={d} className="py-2 text-center text-[11px] font-semibold uppercase tracking-[0.12em] text-mute">{d}</div>
+              ))}
+            </div>
 
-          {/* Calendar Grid */}
-          <div className="grid grid-cols-7 gap-1">
-            {cells.map((day, i) => {
-              if (day === null) return <div key={i} />;
-
-              const isCurrentMonth = i >= firstDayOfWeek && i < firstDayOfWeek + daysInMonth;
-              const dateKey = toDateKey(year, month, day);
-              const status = isCurrentMonth ? monthAttendance.get(dateKey) : undefined;
-              const selected = selectedDate === dateKey;
-              const todayDate = isToday(day);
-              const hasDeadline = isCurrentMonth && projects.some((p) => p.deadline && p.deadline.slice(0, 10) === dateKey && p.status !== 'completed');
-
-              return (
-                <button
-                  key={i}
-                  onClick={() => {
-                    if (isCurrentMonth) {
-                      setSelectedDate(selected ? null : dateKey);
-                    }
-                  }}
-                  className={`
-                    relative flex flex-col items-center justify-center h-12 md:h-14 rounded-xl text-sm transition-all
-                    ${!isCurrentMonth ? 'text-gray-200' : ''}
-                    ${isCurrentMonth && !selected && !status ? 'hover:bg-brand-50 text-navy-900' : ''}
-                    ${todayDate && !selected && !status ? 'ring-1 ring-green-primary/40 text-navy-900' : ''}
-                    ${status ? STATUS_STYLES[status].cell : ''}
-                    ${selected ? 'ring-2 ring-green-primary text-navy-900' : ''}
-                  `}
+            <div className="overflow-hidden">
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={`${y}-${m}`}
+                  initial={{ opacity: 0, x: dir * 28 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: dir * -28 }}
+                  transition={{ duration: 0.32, ease: EASE }}
+                  className="grid grid-cols-7 gap-1.5 sm:gap-2"
                 >
-                  <span>{day}</span>
-                  {(status || hasDeadline) && isCurrentMonth && (
-                    <div className="flex items-center gap-0.5 mt-0.5">
-                      {status && (
-                        <span className={`w-1.5 h-1.5 rounded-full ${STATUS_STYLES[status].dot}`} />
-                      )}
-                      {hasDeadline && (
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                      )}
-                    </div>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Legend */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-5 pt-4 border-t border-brand-100">
-            {(STATUS_ORDER).map((s) => (
-              <span key={s} className="flex items-center gap-1.5 text-[11px] font-medium text-gray-500">
-                <span className={`w-2 h-2 rounded-full ${STATUS_STYLES[s].dot}`} />
-                {ATTENDANCE_LABELS[s]}
-              </span>
-            ))}
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-gray-500">
-              <span className="w-2 h-2 rounded-full bg-amber-400" />
-              Deadline
-            </span>
-          </div>
-        </div>
-
-        {/* ── Side Panel ── */}
-        <div className="flex flex-col gap-5">
-          {/* Month Summary */}
-          <Reveal y={15} duration={0.4}>
-            <div className="bg-white rounded-[22px] shadow-card p-5 md:p-6">
-              <div className="flex items-center gap-2 mb-4">
-                <CalendarCheck size={16} className="text-green-primary" />
-                <h3 className="text-base font-semibold text-navy-900">
-                  {MONTHS[month]} Summary
-                </h3>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3 mb-5">
-                <div className="text-center p-3 rounded-xl bg-green-mint/40">
-                  <p className="text-2xl font-bold text-green-dark">{monthStats.worked}</p>
-                  <p className="text-[10px] font-medium text-gray-500 mt-0.5">Worked</p>
-                </div>
-                <div className="text-center p-3 rounded-xl bg-green-mint/20">
-                  <p className="text-2xl font-bold text-navy-900">{monthStats.halfDays}</p>
-                  <p className="text-[10px] font-medium text-gray-500 mt-0.5">Half Day</p>
-                </div>
-                <div className="text-center p-3 rounded-xl bg-red-50">
-                  <p className="text-2xl font-bold text-red-600">{monthStats.absent}</p>
-                  <p className="text-[10px] font-medium text-gray-500 mt-0.5">Absent</p>
-                </div>
-              </div>
-
-              {/* Daily rate + expected salary */}
-              <div className="rounded-xl bg-gradient-to-br from-green-primary to-green-dark text-white p-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-[11px] font-medium text-white/80">Daily Rate</p>
-                  {editingRate ? (
-                    <button onClick={() => setEditingRate(false)} className="text-[11px] font-semibold text-white/80 hover:text-white">
-                      Cancel
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => { setRateInput(String(dailyRate)); setEditingRate(true); }}
-                      className="flex items-center gap-1 text-[11px] font-semibold text-white/80 hover:text-white transition-colors"
-                    >
-                      <Pencil size={11} />
-                      Edit
-                    </button>
-                  )}
-                </div>
-
-                {editingRate ? (
-                  <div className="flex items-center gap-2 mt-2">
-                    <span className="text-sm font-bold">₱</span>
-                    <input
-                      type="number"
-                      value={rateInput}
-                      onChange={(e) => setRateInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') saveRate();
-                        if (e.key === 'Escape') setEditingRate(false);
-                      }}
-                      autoFocus
-                      className="w-full px-3 py-1.5 rounded-lg bg-white/15 border border-white/25 text-white text-sm font-bold outline-none focus:ring-2 focus:ring-white/40"
-                    />
-                    <button onClick={saveRate} className="p-1.5 rounded-lg bg-white/20 hover:bg-white/30 transition-colors">
-                      <Check size={14} />
-                    </button>
-                  </div>
-                ) : (
-                  <p className="text-2xl font-bold mt-1">{fmt(dailyRate)}</p>
-                )}
-
-                <div className="h-px bg-white/20 my-3" />
-                <div className="flex items-center justify-between">
-                  <p className="text-[11px] font-medium text-white/80">Expected Salary</p>
-                  <p className="text-xl font-bold">{fmt(monthStats.expected)}</p>
-                </div>
-              </div>
-            </div>
-          </Reveal>
-
-          {/* Quick actions for selected date */}
-          <AnimatePresence>
-            {selectedDate && (
-              <motion.div
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 15 }}
-                transition={{ duration: 0.25 }}
-                className="bg-white rounded-[22px] shadow-card p-5 md:p-6"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <h3 className="text-base font-semibold text-navy-900">
-                    {new Date(Number(selectedDate.split('-')[0]), Number(selectedDate.split('-')[1]) - 1, Number(selectedDate.split('-')[2])).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
-                  </h3>
-                  {selectedRecord && (
-                    <button onClick={handleClear} className="flex items-center gap-1 text-[11px] font-medium text-gray-400 hover:text-red-500 transition-colors" title="Clear this day">
-                      <RotateCcw size={12} />
-                      Clear
-                    </button>
-                  )}
-                </div>
-                <p className="text-[11px] text-gray-400 mb-3">
-                  {selectedRecord ? `Marked as ${ATTENDANCE_LABELS[selectedRecord.status]}` : 'How was this day?'}
-                </p>
-
-                <div className="grid grid-cols-2 gap-2">
-                  {STATUS_ORDER.map((s) => {
-                    const active = selectedRecord?.status === s;
+                  {Array.from({ length: firstDow }, (_, i) => <div key={`b${i}`} aria-hidden />)}
+                  {Array.from({ length: daysInMonth }, (_, i) => {
+                    const day = i + 1;
+                    const k = key(y, m, day);
+                    const status = byDate.get(k);
+                    const isSel = selected === k;
+                    const isToday = k === today;
+                    const hasDeadline = deadlineDates.has(k);
                     return (
                       <button
-                        key={s}
-                        onClick={() => handleSetStatus(s)}
-                        className={`
-                          flex items-center justify-center gap-1.5 px-2 py-2 rounded-xl text-xs font-semibold transition-all
-                          ${active ? STATUS_STYLES[s].chip + ' ring-1 ring-green-primary/30' : 'bg-brand-50 text-gray-500 hover:bg-brand-100'}
-                        `}
+                        key={k}
+                        type="button"
+                        onClick={() => setSelected(isSel ? null : k)}
+                        aria-pressed={isSel}
+                        aria-label={`${MONTHS[m]} ${day}${status ? `, ${ATTENDANCE_LABELS[status]}` : ''}${hasDeadline ? ', project deadline' : ''}`}
+                        className={cn(
+                          'relative flex aspect-square flex-col items-center justify-center rounded-2xl text-sm font-medium transition-[transform,background-color,box-shadow] duration-300 ease-matie active:scale-90',
+                          status ? STATUS_UI[status].cell : 'bg-paper-2 text-ink ring-1 ring-inset ring-ink/[0.05] hover:bg-brand-50 hover:ring-brand-600/20',
+                          isToday && !isSel && 'outline outline-2 outline-offset-2 outline-brand-500',
+                          isSel && 'scale-[1.06] shadow-lift outline outline-2 outline-offset-2 outline-ink',
+                        )}
                       >
-                        {s === 'worked' && <Check size={13} />}
-                        {s === 'absent' && <X size={13} />}
-                        {s === 'rest' && <Briefcase size={13} />}
-                        {ATTENDANCE_LABELS[s]}
+                        <span className="tabular-nums">{day}</span>
+                        {hasDeadline && <span className={cn('absolute bottom-1.5 h-1.5 w-1.5 rounded-full', status === 'worked' ? 'bg-warn-100' : 'bg-warn-500')} />}
                       </button>
                     );
                   })}
-                </div>
+                </motion.div>
+              </AnimatePresence>
+            </div>
 
-                {selectedDeadlines.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-brand-100">
-                    <p className="text-[11px] font-semibold text-amber-600 mb-2">Deadline this day</p>
-                    {selectedDeadlines.map((p) => {
-                      const client = clients.find((c) => c.id === p.clientId);
+            <div className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-ink/[0.07] pt-4">
+              {STATUS_ORDER.map((s) => (
+                <span key={s} className="flex items-center gap-1.5 text-[11.5px] font-medium text-mute">
+                  <span className={cn('h-2.5 w-2.5 rounded-full', STATUS_UI[s].dot)} />
+                  {ATTENDANCE_LABELS[s]}
+                </span>
+              ))}
+              <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-mute"><span className="h-2 w-2 rounded-full bg-warn-500" /> Deadline</span>
+            </div>
+          </div>
+        </Card>
+
+        <div className="flex flex-col gap-5">
+          <Card bezel tone="brand" pad="none">
+            <div className="p-6">
+              <div className="flex items-center justify-between">
+                <p className="text-[13px] font-medium text-white/70">Expected salary · {MONTHS[m]}</p>
+                {editingRate ? (
+                  <button type="button" onClick={() => setEditingRate(false)} className="text-[12px] font-medium text-white/70 hover:text-white">Cancel</button>
+                ) : (
+                  <button type="button" onClick={() => { setRateInput(String(dailyRate)); setEditingRate(true); }} className="flex items-center gap-1 rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-medium text-white ring-1 ring-white/10 transition-colors hover:bg-white/15">
+                    <Pencil size={11} strokeWidth={1.75} /> Rate
+                  </button>
+                )}
+              </div>
+              <p className="mt-2 text-[44px] font-semibold leading-none tracking-[-0.045em]"><Money value={stats.expected} animate /></p>
+
+              <div className="mt-5 flex items-center justify-between rounded-2xl bg-white/10 px-4 py-3 ring-1 ring-white/10">
+                {editingRate ? (
+                  <form onSubmit={(e) => { e.preventDefault(); saveRate(); }} className="flex w-full items-center gap-2">
+                    <div className="flex-1 [&_input]:border-0 [&_input]:bg-white [&_input]:text-ink"><MoneyInput data-autofocus aria-label="Daily rate" value={rateInput} onChange={(e) => setRateInput(e.target.value)} className="h-10" /></div>
+                    <Button type="submit" size="sm" variant="dark">Save</Button>
+                  </form>
+                ) : (
+                  <>
+                    <span className="text-[12px] text-white/70">Daily rate</span>
+                    <span className="text-lg font-semibold tabular-nums"><Money value={dailyRate} /></span>
+                  </>
+                )}
+              </div>
+
+              <dl className="mt-5 grid grid-cols-3 divide-x divide-white/10 text-center">
+                {[
+                  ['Worked', stats.worked],
+                  ['Half day', stats.half],
+                  ['Absent', stats.absent],
+                ].map(([label, value]) => (
+                  <div key={label as string}>
+                    <dd className="text-2xl font-semibold tabular-nums">{value}</dd>
+                    <dt className="text-[11px] text-white/60">{label}</dt>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          </Card>
+
+          <AnimatePresence>
+            {selected && (
+              <motion.div initial={{ opacity: 0, y: 14, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: 0.98 }} transition={{ duration: 0.4, ease: EASE }}>
+                <Card bezel pad="md">
+                  <div className="mb-1 flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-[15px] font-semibold tracking-tight text-ink">{selectedLabel}</h3>
+                      <p className="mt-0.5 text-xs text-mute">{selectedStatus ? `Marked as ${ATTENDANCE_LABELS[selectedStatus]}` : 'How was this day?'}</p>
+                    </div>
+                    {selectedStatus && (
+                      <button type="button" onClick={() => { clearAttendance(selected); setSelected(null); }} className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium text-mute transition-colors hover:bg-danger-100 hover:text-danger-700">
+                        <RotateCcw size={12} strokeWidth={1.75} /> Clear
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-2">
+                    {STATUS_ORDER.map((s) => {
+                      const Icon = STATUS_UI[s].icon;
+                      const on = selectedStatus === s;
                       return (
-                        <div key={p.id} onClick={() => navigate(`/clients/${p.clientId}`)} className="flex items-center gap-2 p-2 rounded-lg hover:bg-brand-50 cursor-pointer transition-colors">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                          <p className="text-xs font-medium text-navy-900 truncate flex-1">{p.name}</p>
-                          {client && <p className="text-[10px] text-gray-400 truncate">{client.name}</p>}
-                        </div>
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => setStatus(s)}
+                          className={cn(
+                            'flex items-center gap-2 rounded-2xl px-3 py-2.5 text-[13px] font-medium transition-[transform,background-color,box-shadow] duration-300 ease-matie active:scale-95',
+                            on ? cn(STATUS_UI[s].cell, 'ring-2 ring-ink/10') : 'bg-paper-2 text-ink-2 ring-1 ring-inset ring-ink/[0.06] hover:bg-brand-50',
+                          )}
+                        >
+                          <Icon size={15} strokeWidth={1.75} />
+                          {ATTENDANCE_LABELS[s]}
+                        </button>
                       );
                     })}
                   </div>
-                )}
+                  {selectedDeadlines.length > 0 && (
+                    <div className="mt-4 border-t border-ink/[0.07] pt-3">
+                      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-warn-700">Due this day</p>
+                      {selectedDeadlines.map((p) => (
+                        <Link key={p.id} to={R.client(p.clientId)} className="flex items-center gap-2 rounded-xl p-2 transition-colors hover:bg-ink/[0.04]">
+                          <span className="h-1.5 w-1.5 rounded-full bg-warn-500" />
+                          <span className="flex-1 truncate text-[13px] font-medium text-ink">{p.name}</span>
+                          <span className="truncate text-[11px] text-mute"><PrivateText type="name">{clients.find((c) => c.id === p.clientId)?.name ?? ''}</PrivateText></span>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </Card>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* Upcoming Deadlines */}
-          <Reveal y={15} duration={0.4}>
-            <div className="bg-white rounded-[22px] shadow-card p-5 md:p-6">
-              <h3 className="text-base font-semibold text-navy-900 mb-4">Upcoming Deadlines</h3>
-              {upcoming.length === 0 ? (
-                <p className="text-sm text-gray-500 text-center py-6">No upcoming deadlines</p>
-              ) : (
-                <div className="space-y-3">
-                  {upcoming.map((p) => {
-                    const client = clients.find((c) => c.id === p.clientId);
-                    const overdue = new Date(p.deadline) < new Date();
-                    return (
-                      <div
-                        key={p.id}
-                        onClick={() => navigate(`/clients/${p.clientId}`)}
-                        className="flex items-center gap-3 p-3 rounded-xl hover:bg-brand-50 transition-all cursor-pointer"
-                      >
-                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${overdue ? 'bg-red-500' : 'bg-green-primary'}`} />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-navy-900 truncate">{p.name}</p>
-                          <p className="text-[11px] text-gray-500 truncate">{client?.name || 'Unknown'}</p>
-                        </div>
-                        <span className={`text-[11px] font-semibold shrink-0 ${overdue ? 'text-red-500' : 'text-gray-500'}`}>
-                          {new Date(p.deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+          <Card bezel pad="md">
+            <CardHeader title="Upcoming deadlines" />
+            {upcoming.length === 0 ? (
+              <p className="py-4 text-center text-sm text-mute">No upcoming deadlines</p>
+            ) : (
+              <ul className="-mx-2 space-y-0.5">
+                {upcoming.map((p) => {
+                  const d = daysUntil(p.deadline) ?? 0;
+                  return (
+                    <li key={p.id}>
+                      <Link to={R.client(p.clientId)} className="flex items-center gap-3 rounded-2xl p-2.5 transition-colors hover:bg-ink/[0.04]">
+                        <span className={cn('h-2 w-2 shrink-0 rounded-full', d < 0 ? 'bg-danger-500' : d <= 3 ? 'bg-warn-500' : 'bg-brand-500')} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[13.5px] font-medium text-ink">{p.name}</span>
+                          <span className="block truncate text-[11.5px] text-mute"><PrivateText type="name">{clients.find((c) => c.id === p.clientId)?.name ?? 'Unknown'}</PrivateText></span>
                         </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </Reveal>
+                        <Badge tone={d < 0 ? 'danger' : d <= 3 ? 'warn' : 'neutral'}>{fmtDate(p.deadline)}</Badge>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </Card>
         </div>
       </div>
     </div>

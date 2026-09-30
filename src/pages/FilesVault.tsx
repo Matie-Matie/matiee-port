@@ -1,375 +1,242 @@
-import { useState, useRef, useMemo } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Plus, X, Trash2, Download, FileText, FileImage, FileArchive, File, ShieldCheck, HardDrive, FolderOpen,
-} from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Download, File as FileIcon, FileArchive, FileImage, FileText, FolderLock, HardDrive, Plus, ShieldCheck, Trash2, UploadCloud } from 'lucide-react';
 import { useMatieeStore } from '../store/matieeStore';
-import Reveal from '../components/Reveal';
-import type { VaultFile, VaultFileCategory } from '../types';
-import { VAULT_FILE_CATEGORIES } from '../types';
+import { VAULT_FILE_CATEGORIES, type VaultFile, type VaultFileCategory } from '../types';
+import { fmtBytes, fmtDateLong } from '../lib/format';
+import { STORAGE_BUDGET, vaultUsage } from '../lib/storage';
+import { fadeUp, stagger } from '../lib/motion';
+import { cn } from '../lib/cn';
+import { PageHeader } from '../ui/PageHeader';
+import { Button, IconButton } from '../ui/Button';
+import { Card } from '../ui/Card';
+import { Badge, type BadgeTone } from '../ui/Badge';
+import { Bar } from '../ui/Progress';
+import { Chips } from '../ui/Chips';
+import { EmptyState } from '../ui/EmptyState';
+import { Field, Input } from '../ui/Field';
+import { Segmented } from '../ui/Segmented';
+import Modal from '../ui/Modal';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { toast } from '../ui/toast';
 
 const CATEGORY_ORDER: VaultFileCategory[] = ['contract', 'receipt', 'reference', 'certificate', 'other'];
+const CATEGORY_TONE: Record<VaultFileCategory, BadgeTone> = { contract: 'brand', receipt: 'warn', reference: 'sand', certificate: 'ink', other: 'neutral' };
+const MAX_FILE_SIZE = 3 * 1024 * 1024;
 
-const CATEGORY_STYLES: Record<VaultFileCategory, { chip: string; icon: string }> = {
-  contract: { chip: 'bg-green-mint/40 text-green-dark', icon: 'text-green-primary' },
-  receipt: { chip: 'bg-amber-50 text-amber-700', icon: 'text-amber-500' },
-  reference: { chip: 'bg-blue-50 text-blue-700', icon: 'text-blue-500' },
-  certificate: { chip: 'bg-purple-50 text-purple-700', icon: 'text-purple-500' },
-  other: { chip: 'bg-gray-100 text-gray-500', icon: 'text-gray-400' },
-};
-
-const MAX_FILE_SIZE = 3 * 1024 * 1024; // 3MB per file (localStorage-friendly)
-
-function fmtSize(bytes: number) {
-  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
-  return bytes + ' B';
-}
-
-function fileIcon(type: string) {
-  if (type.startsWith('image/')) return FileImage;
+function iconFor(type: string) {
   if (type.includes('zip') || type.includes('compressed') || type.includes('rar')) return FileArchive;
+  if (type.startsWith('image/')) return FileImage;
   if (type.startsWith('text/') || type.includes('pdf') || type.includes('word') || type.includes('sheet')) return FileText;
-  return File;
+  return FileIcon;
 }
 
-function fileKey(f: VaultFile) {
-  return `${f.name}-${f.size}-${f.uploadedAt}`;
-}
+type Pending = { name: string; type: string; size: number; data: string };
+type Filter = 'all' | VaultFileCategory;
 
 export default function FilesVault() {
-  const vaultFiles = useMatieeStore((s) => s.vaultFiles);
+  const files = useMatieeStore((s) => s.vaultFiles);
   const addVaultFile = useMatieeStore((s) => s.addVaultFile);
   const deleteVaultFile = useMatieeStore((s) => s.deleteVaultFile);
 
-  const [showModal, setShowModal] = useState(false);
+  const [open, setOpen] = useState(false);
   const [category, setCategory] = useState<VaultFileCategory>('contract');
   const [description, setDescription] = useState('');
-  const [pendingFile, setPendingFile] = useState<{ name: string; type: string; size: number; data: string } | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState('');
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [toDelete, setToDelete] = useState<VaultFile | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const [filter, setFilter] = useState<'all' | VaultFileCategory>('all');
+  const totalSize = useMemo(() => files.reduce((s, f) => s + f.size, 0), [files]);
+  const usage = vaultUsage();
+  const usagePct = Math.min(100, (usage / STORAGE_BUDGET) * 100);
+  const visible = useMemo(() => (filter === 'all' ? files : files.filter((f) => f.category === filter)), [files, filter]);
+  const counts = useMemo(() => {
+    const c: Record<Filter, number> = { all: files.length, contract: 0, receipt: 0, reference: 0, certificate: 0, other: 0 };
+    files.forEach((f) => (c[f.category] += 1));
+    return c;
+  }, [files]);
 
-  const grouped = useMemo(() => {
-    const filtered = filter === 'all' ? vaultFiles : vaultFiles.filter((f) => f.category === filter);
-    return filtered;
-  }, [vaultFiles, filter]);
-
-  const totalSize = useMemo(() => vaultFiles.reduce((s, f) => s + f.size, 0), [vaultFiles]);
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  function readFile(file: File | undefined) {
     if (!file) return;
     if (file.size > MAX_FILE_SIZE) {
-      setError(`File too large (max 3MB). Found: ${fmtSize(file.size)}`);
-      setPendingFile(null);
+      setError(`That file is ${fmtBytes(file.size)} — the limit is 3 MB so your vault stays fast.`);
+      setPending(null);
       return;
     }
     setError('');
     const reader = new FileReader();
-    reader.onload = () => {
-      setPendingFile({ name: file.name, type: file.type || 'application/octet-stream', size: file.size, data: reader.result as string });
-    };
+    reader.onload = () => setPending({ name: file.name, type: file.type || 'application/octet-stream', size: file.size, data: reader.result as string });
     reader.readAsDataURL(file);
-    // Reset input so the same file can be re-selected
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
+  }
 
-  const handleSave = () => {
-    if (!pendingFile) return;
-    addVaultFile({
-      name: pendingFile.name,
-      type: pendingFile.type,
-      size: pendingFile.size,
-      data: pendingFile.data,
-      category,
-      description: description.trim() || undefined,
-    });
-    setShowModal(false);
-    setPendingFile(null);
+  function openUpload() {
+    setPending(null);
+    setError('');
     setDescription('');
     setCategory('contract');
-  };
+    setOpen(true);
+  }
 
-  const handleDelete = (id: string) => {
-    if (confirm('Delete this file from the vault?')) deleteVaultFile(id);
-  };
+  function save() {
+    if (!pending) return;
+    addVaultFile({ ...pending, category, description: description.trim() || undefined });
+    setOpen(false);
+    toast('Saved to your vault', 'success');
+  }
 
-  const handleDownload = (f: VaultFile) => {
+  function download(f: VaultFile) {
     const a = document.createElement('a');
     a.href = f.data;
     a.download = f.name;
     a.click();
-  };
-
-  const counts = useMemo(() => {
-    const map = new Map<VaultFileCategory, number>();
-    CATEGORY_ORDER.forEach((c) => map.set(c, 0));
-    vaultFiles.forEach((f) => map.set(f.category, (map.get(f.category) || 0) + 1));
-    return map;
-  }, [vaultFiles]);
+  }
 
   return (
-    <div className="space-y-6">
-      {/* ── Header ── */}
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4"
-      >
-        <div>
-          <h1 className="text-[32px] md:text-[46px] font-bold text-navy-900 leading-none tracking-tight">Files & Contracts</h1>
-          <p className="text-sm text-gray-500 mt-2">Your paper trail — contracts, receipts, references. All in one safe place.</p>
-        </div>
-        <button
-          onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 h-11 px-5 bg-green-primary hover:bg-green-dark text-white text-sm font-medium rounded-full transition-all shadow-sm"
-        >
-          <Plus size={16} />
-          Upload File
-        </button>
+    <div className="space-y-5">
+      <PageHeader
+        eyebrow="Files & Contracts"
+        title="Your paper trail"
+        description="Contracts, receipts, references — kept safely in your vault."
+        actions={<Button size="lg" trailing={<Plus size={16} strokeWidth={2} />} onClick={openUpload}>Upload file</Button>}
+      />
+
+      <motion.div variants={stagger(0.06)} initial="hidden" animate="show" className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {[
+          { icon: FolderLock, label: 'Files', value: <span className="tabular-nums">{files.length}</span>, sub: `${counts.contract} contract${counts.contract === 1 ? '' : 's'}` },
+          { icon: HardDrive, label: 'File size', value: fmtBytes(totalSize), sub: 'Stored as base64 in this browser' },
+          { icon: ShieldCheck, label: 'Vault storage', value: `${(usage / (1024 * 1024)).toFixed(1)} MB`, sub: 'of about 5 MB browser limit', bar: usagePct },
+        ].map((s) => {
+          const Icon = s.icon;
+          return (
+            <motion.div key={s.label} variants={fadeUp} className="min-w-0 [&>*]:h-full">
+              <Card bezel spotlight pad="md">
+                <div className="flex items-center gap-2.5">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-50 text-brand-600"><Icon size={17} strokeWidth={1.6} /></span>
+                  <p className="text-[13px] text-mute">{s.label}</p>
+                </div>
+                <p className="mt-3 text-[28px] font-semibold leading-none tracking-[-0.04em] text-ink">{s.value}</p>
+                {'bar' in s && s.bar !== undefined && <Bar value={s.bar} height={5} tone={s.bar > 80 ? 'danger' : s.bar > 60 ? 'warn' : 'brand'} className="mt-3" label="Browser storage used" />}
+                <p className="mt-2 text-xs text-mute">{s.sub}</p>
+              </Card>
+            </motion.div>
+          );
+        })}
       </motion.div>
 
-      {/* ── Top Stats ── */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.1 }}
-        className="grid grid-cols-1 sm:grid-cols-3 gap-4"
-      >
-        <div className="bg-white rounded-[22px] shadow-card p-5">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-green-mint/40 flex items-center justify-center">
-              <FolderOpen size={18} className="text-green-primary" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Total Files</p>
-              <p className="text-xl font-bold text-navy-900">{vaultFiles.length}</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-[22px] shadow-card p-5">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center">
-              <HardDrive size={18} className="text-blue-500" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Storage Used</p>
-              <p className="text-xl font-bold text-navy-900">{fmtSize(totalSize)}</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-[22px] shadow-card p-5">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-green-mint/40 flex items-center justify-center">
-              <ShieldCheck size={18} className="text-green-primary" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Contracts</p>
-              <p className="text-xl font-bold text-navy-900">{counts.get('contract') || 0}</p>
-            </div>
-          </div>
-        </div>
-      </motion.div>
+      {files.length > 0 && (
+        <Segmented<Filter>
+          ariaLabel="Filter by category"
+          value={filter}
+          onChange={setFilter}
+          options={[{ value: 'all', label: 'All', count: counts.all }, ...CATEGORY_ORDER.map((c) => ({ value: c as Filter, label: VAULT_FILE_CATEGORIES[c], count: counts[c] }))]}
+        />
+      )}
 
-      {/* ── Category Filter ── */}
-      <Reveal y={15} duration={0.4}>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => setFilter('all')}
-            className={`px-4 py-2 rounded-full text-xs font-semibold transition-all ${filter === 'all' ? 'bg-green-primary text-white' : 'bg-white text-gray-500 hover:bg-brand-50'}`}
-          >
-            All ({vaultFiles.length})
-          </button>
-          {CATEGORY_ORDER.map((c) => (
-            <button
-              key={c}
-              onClick={() => setFilter(c)}
-              className={`px-4 py-2 rounded-full text-xs font-semibold transition-all ${filter === c ? 'bg-green-primary text-white' : `bg-white text-gray-500 hover:bg-brand-50 ${CATEGORY_STYLES[c].chip.split(' ')[0]}`}`}
-            >
-              {VAULT_FILE_CATEGORIES[c]} ({counts.get(c) || 0})
-            </button>
-          ))}
-        </div>
-      </Reveal>
-
-      {/* ── File Grid ── */}
-      {grouped.length === 0 ? (
-        <Reveal y={15} duration={0.4}>
-          <div className="bg-white rounded-[22px] p-16 shadow-card flex flex-col items-center justify-center text-center">
-            <div className="w-16 h-16 rounded-2xl bg-brand-50 flex items-center justify-center mb-4">
-              <FileText size={32} className="text-gray-300" />
-            </div>
-            <h3 className="text-lg font-bold text-navy-900 mb-2">No files in this vault yet</h3>
-            <p className="text-sm text-gray-500 max-w-sm mb-6">
-              Upload contracts, receipts, references, certificates — anything you need to keep safe.
-            </p>
-            <button
-              onClick={() => setShowModal(true)}
-              className="flex items-center gap-2 px-6 py-3 bg-green-primary text-white rounded-xl hover:bg-green-dark transition-colors text-sm font-medium shadow-sm"
-            >
-              <Plus size={18} />
-              Upload Your First File
-            </button>
-          </div>
-        </Reveal>
+      {visible.length === 0 ? (
+        <Card bezel pad="none">
+          <EmptyState
+            icon={FolderLock}
+            title={files.length === 0 ? 'Nothing in the vault yet' : 'No files in this category'}
+            description={files.length === 0 ? 'Upload a contract, receipt or certificate and it will be waiting here.' : 'Try another category.'}
+            action={files.length === 0 ? <Button trailing={<Plus size={16} strokeWidth={2} />} onClick={openUpload}>Upload your first file</Button> : undefined}
+          />
+        </Card>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <AnimatePresence mode="popLayout">
-            {grouped.map((f, i) => {
-              const Icon = fileIcon(f.type);
-              const styles = CATEGORY_STYLES[f.category];
+            {visible.map((f, i) => {
+              const Icon = iconFor(f.type);
+              const isImage = f.type.startsWith('image/');
               return (
-                <motion.div
-                  key={fileKey(f)}
-                  layout
-                  initial={{ opacity: 0, y: 15 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.25, delay: i * 0.03 }}
-                  className="bg-white rounded-[22px] shadow-card p-5 group"
-                >
-                  <div className="flex items-start justify-between mb-4">
-                    <div className={`w-11 h-11 rounded-xl ${styles.chip.split(' ')[0]} flex items-center justify-center ${styles.icon}`}>
-                      <Icon size={20} />
+                <motion.li key={f.id} layout initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96 }} transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1], delay: Math.min(i, 8) * 0.03 }} className="min-w-0 [&>*]:h-full">
+                  <Card bezel spotlight pad="none" className="group" coreClassName="flex flex-col">
+                    {isImage ? (
+                      <div className="h-36 overflow-hidden bg-paper-2">
+                        <img src={f.data} alt="" className="h-full w-full object-cover transition-transform duration-700 ease-matie group-hover:scale-105" />
+                      </div>
+                    ) : (
+                      <div className="flex h-24 items-center justify-center bg-gradient-to-b from-paper-2 to-paper">
+                        <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-paper text-brand-600 shadow-soft ring-1 ring-ink/[0.06]"><Icon size={22} strokeWidth={1.5} /></span>
+                      </div>
+                    )}
+                    <div className="flex flex-1 flex-col p-5">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="min-w-0 truncate text-[14.5px] font-semibold tracking-tight text-ink" title={f.name}>{f.name}</p>
+                      </div>
+                      {f.description && <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-mute">{f.description}</p>}
+                      <div className="mt-3 flex items-center gap-2">
+                        <Badge tone={CATEGORY_TONE[f.category]}>{VAULT_FILE_CATEGORIES[f.category]}</Badge>
+                        <span className="text-[11.5px] text-mute">{fmtBytes(f.size)}</span>
+                      </div>
+                      <div className="mt-auto flex items-center justify-between pt-4">
+                        <span className="text-[11px] text-mute">{fmtDateLong(f.uploadedAt)}</span>
+                        <div className="flex gap-1">
+                          <IconButton size="sm" tone="soft" label={`Download ${f.name}`} onClick={() => download(f)}><Download size={14} strokeWidth={1.75} /></IconButton>
+                          <IconButton size="sm" tone="danger" label={`Delete ${f.name}`} onClick={() => setToDelete(f)}><Trash2 size={14} strokeWidth={1.75} /></IconButton>
+                        </div>
+                      </div>
                     </div>
-                    <button onClick={() => handleDelete(f.id)} className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all">
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-
-                  <p className="text-sm font-semibold text-navy-900 truncate mb-1" title={f.name}>{f.name}</p>
-                  {f.description && <p className="text-xs text-gray-400 line-clamp-2 mb-2">{f.description}</p>}
-                  <div className="flex items-center justify-between">
-                    <span className={`text-[10px] font-semibold px-2.5 py-1 rounded-full ${styles.chip}`}>
-                      {VAULT_FILE_CATEGORIES[f.category]}
-                    </span>
-                    <span className="text-[11px] text-gray-400">{fmtSize(f.size)}</span>
-                  </div>
-
-                  <div className="flex items-center justify-between mt-4 pt-3 border-t border-brand-50">
-                    <span className="text-[10px] text-gray-400">
-                      {new Date(f.uploadedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                    </span>
-                    <button onClick={() => handleDownload(f)} className="flex items-center gap-1.5 text-xs font-semibold text-green-primary hover:text-green-dark transition-colors">
-                      <Download size={13} />
-                      Download
-                    </button>
-                  </div>
-                </motion.div>
+                  </Card>
+                </motion.li>
               );
             })}
           </AnimatePresence>
-        </div>
+        </ul>
       )}
 
-      {/* ── Upload Modal ── */}
-      <AnimatePresence>
-        {showModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
-            onClick={(e) => { if (e.target === e.currentTarget) { setShowModal(false); setPendingFile(null); setError(''); } }}
+      <Modal
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Upload to vault"
+        footer={<><Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={save} disabled={!pending}>Save to vault</Button></>}
+      >
+        <div className="flex flex-col gap-4">
+          <input ref={inputRef} type="file" className="hidden" aria-label="Choose a file" onChange={(e) => { readFile(e.target.files?.[0]); e.target.value = ''; }} />
+          <button
+            type="button"
+            data-autofocus
+            onClick={() => inputRef.current?.click()}
+            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => { e.preventDefault(); setDragging(false); readFile(e.dataTransfer.files?.[0]); }}
+            className={cn(
+              'flex flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-9 text-center transition-[background-color,border-color,transform] duration-300 ease-matie',
+              dragging ? 'scale-[1.01] border-brand-600 bg-brand-50' : 'border-ink/20 bg-paper-2 hover:border-brand-600/50 hover:bg-brand-50/60',
+            )}
           >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              transition={{ duration: 0.2 }}
-              className="bg-white rounded-[22px] p-6 w-full max-w-md shadow-xl"
-            >
-              <div className="flex items-center justify-between mb-5">
-                <h2 className="text-xl font-bold text-navy-900">Upload to Vault</h2>
-                <button onClick={() => { setShowModal(false); setPendingFile(null); setError(''); }} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors">
-                  <X size={18} className="text-gray-500" />
-                </button>
-              </div>
+            {pending ? (
+              <>
+                <FileText size={28} strokeWidth={1.5} className="mb-2 text-brand-600" />
+                <p className="max-w-full truncate text-sm font-semibold text-ink">{pending.name}</p>
+                <p className="mt-0.5 text-xs text-mute">{fmtBytes(pending.size)} · click to change</p>
+              </>
+            ) : (
+              <>
+                <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-paper text-brand-600 shadow-soft ring-1 ring-ink/[0.06]"><UploadCloud size={22} strokeWidth={1.5} /></span>
+                <p className="text-sm font-medium text-ink">Drop a file here, or click to browse</p>
+                <p className="mt-1 text-xs text-mute">Up to 3 MB · PDF, images, docs, zips</p>
+              </>
+            )}
+          </button>
+          {error && <p role="alert" className="rounded-xl bg-danger-100 px-3 py-2 text-xs font-medium text-danger-700">{error}</p>}
+          <div>
+            <p className="mb-2 text-xs font-medium text-ink-2">Category</p>
+            <Chips label="Category" value={category} onChange={setCategory} options={CATEGORY_ORDER.map((c) => ({ value: c, label: VAULT_FILE_CATEGORIES[c] }))} />
+          </div>
+          <Field label="Description (optional)">{(id) => <Input id={id} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. DORY employment contract" />}</Field>
+        </div>
+      </Modal>
 
-              <div className="space-y-4">
-                {/* File drop */}
-                <div
-                  onClick={() => fileInputRef.current?.click()}
-                  className="relative rounded-xl border-2 border-dashed border-gray-200 bg-brand-50/60 flex flex-col items-center justify-center py-8 cursor-pointer hover:border-green-primary/40 hover:bg-green-mint/10 transition-all"
-                >
-                  {pendingFile ? (
-                    <div className="text-center px-4">
-                      <FileText size={28} className="text-green-primary mx-auto mb-2" />
-                      <p className="text-sm font-semibold text-navy-900 truncate max-w-full">{pendingFile.name}</p>
-                      <p className="text-[11px] text-gray-400 mt-0.5">{fmtSize(pendingFile.size)}</p>
-                    </div>
-                  ) : (
-                    <div className="text-center px-4">
-                      <div className="w-12 h-12 rounded-2xl bg-white shadow-sm flex items-center justify-center mx-auto mb-3">
-                        <FolderOpen size={22} className="text-gray-300" />
-                      </div>
-                      <p className="text-sm font-medium text-gray-500">Tap to choose a file</p>
-                      <p className="text-[11px] text-gray-400 mt-1">Max 3MB · PDF, images, docs, zips</p>
-                    </div>
-                  )}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    className="hidden"
-                    onChange={handleFileSelect}
-                  />
-                </div>
-
-                {error && (
-                  <p className="text-xs font-medium text-red-500 bg-red-50 rounded-lg px-3 py-2">{error}</p>
-                )}
-
-                {/* Category */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1.5">Category</label>
-                  <div className="flex flex-wrap gap-2">
-                    {CATEGORY_ORDER.map((c) => (
-                      <button
-                        key={c}
-                        onClick={() => setCategory(c)}
-                        className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${category === c ? 'bg-green-primary text-white' : 'bg-brand-50 text-gray-500 hover:bg-brand-100'}`}
-                      >
-                        {VAULT_FILE_CATEGORIES[c]}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Description */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1.5">Description (optional)</label>
-                  <input
-                    type="text"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    placeholder="e.g. DORY employment contract"
-                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm text-navy-900 bg-white outline-none focus:ring-2 focus:ring-green-primary/30 focus:border-transparent transition-all"
-                  />
-                </div>
-              </div>
-
-              <div className="flex gap-3 mt-6">
-                <button
-                  onClick={() => { setShowModal(false); setPendingFile(null); setError(''); }}
-                  className="flex-1 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-500 hover:bg-gray-50 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={!pendingFile}
-                  className="flex-1 py-2.5 rounded-xl bg-green-primary text-white text-sm font-medium hover:bg-green-dark transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  Save to Vault
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <ConfirmDialog
+        open={toDelete !== null}
+        onClose={() => setToDelete(null)}
+        title={`Delete “${toDelete?.name ?? 'file'}”?`}
+        description="It will be removed from your vault. This can't be undone."
+        onConfirm={() => { if (toDelete) deleteVaultFile(toDelete.id); toast('File deleted'); }}
+      />
     </div>
   );
 }

@@ -1,362 +1,184 @@
-import { useState, useMemo } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Plus, X, Trash2, Pencil, Pin, PinOff, Search, BookOpen, Briefcase, Palette, Lightbulb, StickyNote, Scale,
-} from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { BookOpen, Lightbulb, Palette, Pencil, Pin, PinOff, Plus, Scale, Search, StickyNote, Trash2, type LucideIcon } from 'lucide-react';
 import { useMatieeStore } from '../store/matieeStore';
-import Reveal from '../components/Reveal';
-import type { KnowledgeNote, KnowledgeCategory } from '../types';
-import { KNOWLEDGE_CATEGORIES } from '../types';
+import { KNOWLEDGE_CATEGORIES, type KnowledgeCategory, type KnowledgeNote } from '../types';
+import { timeAgo } from '../lib/format';
+import { usePrivacy } from '../lib/usePrivacy';
+import { cn } from '../lib/cn';
+import { PageHeader } from '../ui/PageHeader';
+import { Button, IconButton } from '../ui/Button';
+import { Card } from '../ui/Card';
+import { Badge } from '../ui/Badge';
+import { Chips } from '../ui/Chips';
+import { EmptyState } from '../ui/EmptyState';
+import { Field, Input, Textarea } from '../ui/Field';
+import { Segmented } from '../ui/Segmented';
+import Modal from '../ui/Modal';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { toast } from '../ui/toast';
 
-const CATEGORY_ORDER: KnowledgeCategory[] = ['terms', 'playbook', 'design', 'lessons', 'other'];
-
-const CATEGORY_STYLES: Record<KnowledgeCategory, { chip: string; icon: string; Icon: typeof Briefcase }> = {
-  terms: { chip: 'bg-green-mint/40 text-green-primary', icon: 'bg-green-mint/40 text-green-primary', Icon: Scale },
-  playbook: { chip: 'bg-amber-50 text-amber-500', icon: 'bg-amber-50 text-amber-500', Icon: BookOpen },
-  design: { chip: 'bg-blue-50 text-blue-500', icon: 'bg-blue-50 text-blue-500', Icon: Palette },
-  lessons: { chip: 'bg-purple-50 text-purple-500', icon: 'bg-purple-50 text-purple-500', Icon: Lightbulb },
-  other: { chip: 'bg-gray-100 text-gray-400', icon: 'bg-gray-100 text-gray-400', Icon: StickyNote },
-};
-
-function timeAgo(iso: string) {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
+const ORDER: KnowledgeCategory[] = ['terms', 'playbook', 'design', 'lessons', 'other'];
+const ICONS: Record<KnowledgeCategory, LucideIcon> = { terms: Scale, playbook: BookOpen, design: Palette, lessons: Lightbulb, other: StickyNote };
+type Filter = 'all' | KnowledgeCategory;
 
 export default function KnowledgeVault() {
+  const { on: hide } = usePrivacy();
   const notes = useMatieeStore((s) => s.knowledgeNotes);
-  const addKnowledgeNote = useMatieeStore((s) => s.addKnowledgeNote);
-  const updateKnowledgeNote = useMatieeStore((s) => s.updateKnowledgeNote);
-  const deleteKnowledgeNote = useMatieeStore((s) => s.deleteKnowledgeNote);
+  const addNote = useMatieeStore((s) => s.addKnowledgeNote);
+  const updateNote = useMatieeStore((s) => s.updateKnowledgeNote);
+  const deleteNote = useMatieeStore((s) => s.deleteKnowledgeNote);
 
-  const [showModal, setShowModal] = useState(false);
-  const [editingNote, setEditingNote] = useState<KnowledgeNote | null>(null);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<KnowledgeNote | null>(null);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [category, setCategory] = useState<KnowledgeCategory>('other');
-  const [tagsInput, setTagsInput] = useState('');
-
+  const [tags, setTags] = useState('');
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | KnowledgeCategory>('all');
+  const [filter, setFilter] = useState<Filter>('all');
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [toDelete, setToDelete] = useState<KnowledgeNote | null>(null);
+
+  const counts = useMemo(() => {
+    const c: Record<Filter, number> = { all: notes.length, terms: 0, playbook: 0, design: 0, lessons: 0, other: 0 };
+    notes.forEach((n) => (c[n.category] += 1));
+    return c;
+  }, [notes]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return [...notes]
-      .filter((n) => (filter === 'all' ? true : n.category === filter))
-      .filter((n) => {
-        if (!q) return true;
-        return (
-          n.title.toLowerCase().includes(q) ||
-          n.content.toLowerCase().includes(q) ||
-          n.tags.some((t) => t.toLowerCase().includes(q))
-        );
-      })
-      .sort((a, b) => {
-        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-        return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-      });
+    return notes
+      .filter((n) => (filter === 'all' || n.category === filter) && (!q || n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q) || n.tags.some((t) => t.toLowerCase().includes(q))))
+      .sort((a, b) => (a.pinned !== b.pinned ? (a.pinned ? -1 : 1) : new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
   }, [notes, search, filter]);
 
-  const counts = useMemo(() => {
-    const map = new Map<string, number>();
-    notes.forEach((n) => map.set(n.category, (map.get(n.category) || 0) + 1));
-    return map;
-  }, [notes]);
+  function openEditor(n?: KnowledgeNote) {
+    setEditing(n ?? null);
+    setTitle(n?.title ?? '');
+    setContent(n?.content ?? '');
+    setCategory(n?.category ?? 'other');
+    setTags(n?.tags.join(', ') ?? '');
+    setOpen(true);
+  }
 
-  const openAdd = () => {
-    setEditingNote(null);
-    setTitle('');
-    setContent('');
-    setCategory('other');
-    setTagsInput('');
-    setShowModal(true);
-  };
-
-  const openEdit = (n: KnowledgeNote) => {
-    setEditingNote(n);
-    setTitle(n.title);
-    setContent(n.content);
-    setCategory(n.category);
-    setTagsInput(n.tags.join(', '));
-    setShowModal(true);
-  };
-
-  const handleSave = () => {
+  function save() {
     if (!title.trim()) return;
-    const tags = tagsInput.split(',').map((t) => t.trim()).filter(Boolean);
-    if (editingNote) {
-      updateKnowledgeNote(editingNote.id, { title: title.trim(), content: content.trim(), category, tags });
+    const tagList = tags.split(',').map((t) => t.trim().replace(/^#/, '')).filter(Boolean);
+    if (editing) {
+      updateNote(editing.id, { title: title.trim(), content: content.trim(), category, tags: tagList });
+      toast('Note updated', 'success');
     } else {
-      addKnowledgeNote({ title: title.trim(), content: content.trim(), category, tags, pinned: false });
+      addNote({ title: title.trim(), content: content.trim(), category, tags: tagList, pinned: false });
+      toast('Note saved', 'success');
     }
-    setShowModal(false);
-  };
+    setOpen(false);
+  }
 
-  const handleDelete = (id: string) => {
-    if (confirm('Delete this note?')) deleteKnowledgeNote(id);
-  };
-
-  const togglePin = (n: KnowledgeNote) => {
-    updateKnowledgeNote(n.id, { pinned: !n.pinned });
-  };
+  const filtering = search.trim() !== '' || filter !== 'all';
 
   return (
-    <div className="space-y-6">
-      {/* ── Header ── */}
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4"
-      >
-        <div>
-          <h1 className="text-[32px] md:text-[46px] font-bold text-navy-900 leading-none tracking-tight">Knowledge Vault</h1>
-          <p className="text-sm text-gray-500 mt-2">Your brain, backed up — terms, playbooks, design rules, lessons.</p>
-        </div>
-        <button
-          onClick={openAdd}
-          className="flex items-center gap-2 h-11 px-5 bg-green-primary hover:bg-green-dark text-white text-sm font-medium rounded-full transition-all shadow-sm"
-        >
-          <Plus size={16} />
-          New Note
-        </button>
-      </motion.div>
+    <div className="space-y-5">
+      <PageHeader
+        eyebrow="Knowledge Vault"
+        title="Your second brain"
+        description="Terms, playbooks, design rules and lessons — written down so future-you remembers."
+        actions={<Button size="lg" trailing={<Plus size={16} strokeWidth={2} />} onClick={() => openEditor()}>New note</Button>}
+      />
 
-      {/* ── Search + Filter ── */}
-      <Reveal y={15} duration={0.4}>
-        <div className="flex flex-col md:flex-row gap-3">
-          <div className="relative flex-1">
-            <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search notes, tags, content..."
-              className="w-full pl-11 pr-4 py-3 rounded-full border border-gray-200 bg-white text-sm text-navy-900 outline-none focus:ring-2 focus:ring-green-primary/30 focus:border-transparent transition-all"
-            />
+      {notes.length > 0 && (
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="relative lg:w-80">
+            <Search size={16} strokeWidth={1.5} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-mute" />
+            <Input aria-label="Search notes" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search notes, tags, content" className="pl-10" />
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => setFilter('all')}
-              className={`px-4 py-2 rounded-full text-xs font-semibold transition-all ${filter === 'all' ? 'bg-green-primary text-white' : 'bg-white text-gray-500 hover:bg-brand-50'}`}
-            >
-              All ({notes.length})
-            </button>
-            {CATEGORY_ORDER.map((c) => (
-              <button
-                key={c}
-                onClick={() => setFilter(c)}
-                className={`px-4 py-2 rounded-full text-xs font-semibold transition-all ${filter === c ? 'bg-green-primary text-white' : 'bg-white text-gray-500 hover:bg-brand-50'}`}
-              >
-                {KNOWLEDGE_CATEGORIES[c]} ({counts.get(c) || 0})
-              </button>
-            ))}
-          </div>
-        </div>
-      </Reveal>
-
-      {/* ── Notes Grid ── */}
-      {filtered.length === 0 ? (
-        <Reveal y={15} duration={0.4}>
-          <div className="bg-white rounded-[22px] p-16 shadow-card flex flex-col items-center justify-center text-center">
-            <div className="w-16 h-16 rounded-2xl bg-brand-50 flex items-center justify-center mb-4">
-              <BookOpen size={32} className="text-gray-300" />
-            </div>
-            <h3 className="text-lg font-bold text-navy-900 mb-2">
-              {search || filter !== 'all' ? 'No notes match' : 'Your vault is empty'}
-            </h3>
-            <p className="text-sm text-gray-500 max-w-sm mb-6">
-              {search || filter !== 'all'
-                ? 'Try a different search or category.'
-                : 'Store your employment terms, client playbooks, design rules, and lessons learned.'}
-            </p>
-            {!search && filter === 'all' && (
-              <button
-                onClick={openAdd}
-                className="flex items-center gap-2 px-6 py-3 bg-green-primary text-white rounded-xl hover:bg-green-dark transition-colors text-sm font-medium shadow-sm"
-              >
-                <Plus size={18} />
-                Create Your First Note
-              </button>
-            )}
-          </div>
-        </Reveal>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <AnimatePresence mode="popLayout">
-            {filtered.map((n, i) => {
-              const styles = CATEGORY_STYLES[n.category];
-              const Icon = styles.Icon;
-              return (
-                <motion.div
-                  key={n.id}
-                  layout
-                  initial={{ opacity: 0, y: 15 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.25, delay: i * 0.03 }}
-                  className="bg-white rounded-[22px] shadow-card p-5 flex flex-col group"
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <div className={`w-10 h-10 rounded-xl ${styles.icon.split(' ')[0]} flex items-center justify-center ${styles.icon.split(' ')[1]}`}>
-                      <Icon size={18} />
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => togglePin(n)}
-                        className={`p-1.5 rounded-lg transition-all ${n.pinned ? 'text-amber-500' : 'text-gray-300 hover:text-amber-500'}`}
-                        title={n.pinned ? 'Unpin' : 'Pin'}
-                      >
-                        {n.pinned ? <Pin size={15} fill="currentColor" /> : <PinOff size={15} />}
-                      </button>
-                      <button onClick={() => openEdit(n)} className="p-1.5 rounded-lg text-gray-300 hover:text-navy-900 hover:bg-brand-50 transition-all">
-                        <Pencil size={15} />
-                      </button>
-                      <button onClick={() => handleDelete(n.id)} className="p-1.5 rounded-lg text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all">
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className={`text-[10px] font-semibold px-2.5 py-1 rounded-full ${styles.chip}`}>
-                      {KNOWLEDGE_CATEGORIES[n.category]}
-                    </span>
-                    {n.pinned && (
-                      <span className="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-600">Pinned</span>
-                    )}
-                  </div>
-
-                  <h3 className="font-bold text-navy-900 mb-1.5 leading-snug">{n.title}</h3>
-                  <p className="text-sm text-gray-500 flex-1 whitespace-pre-line line-clamp-4">{n.content}</p>
-
-                  {n.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-3">
-                      {n.tags.map((t) => (
-                        <span key={t} className="text-[10px] font-medium text-gray-400 bg-brand-50 px-2 py-0.5 rounded-full">
-                          #{t}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  <p className="text-[10px] text-gray-400 mt-3 pt-3 border-t border-brand-50">
-                    Updated {timeAgo(n.updatedAt)}
-                  </p>
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
+          <Segmented<Filter>
+            ariaLabel="Filter by category"
+            value={filter}
+            onChange={setFilter}
+            options={[{ value: 'all', label: 'All', count: counts.all }, ...ORDER.map((c) => ({ value: c as Filter, label: KNOWLEDGE_CATEGORIES[c], count: counts[c] }))]}
+          />
         </div>
       )}
 
-      {/* ── Note Modal ── */}
-      <AnimatePresence>
-        {showModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
-            onClick={(e) => { if (e.target === e.currentTarget) setShowModal(false); }}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              transition={{ duration: 0.2 }}
-              className="bg-white rounded-[22px] p-6 w-full max-w-lg shadow-xl"
-            >
-              <div className="flex items-center justify-between mb-5">
-                <h2 className="text-xl font-bold text-navy-900">
-                  {editingNote ? 'Edit Note' : 'New Note'}
-                </h2>
-                <button onClick={() => setShowModal(false)} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors">
-                  <X size={18} className="text-gray-500" />
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                {/* Title */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1.5">Title</label>
-                  <input
-                    type="text"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    placeholder="e.g. My DORY employment terms"
-                    autoFocus
-                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm text-navy-900 bg-white outline-none focus:ring-2 focus:ring-green-primary/30 focus:border-transparent transition-all"
-                  />
-                </div>
-
-                {/* Content */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1.5">Content</label>
-                  <textarea
-                    value={content}
-                    onChange={(e) => setContent(e.target.value)}
-                    placeholder="Write it down so future-you remembers..."
-                    rows={6}
-                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm text-navy-900 bg-white outline-none focus:ring-2 focus:ring-green-primary/30 focus:border-transparent transition-all resize-none"
-                  />
-                </div>
-
-                {/* Category */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1.5">Category</label>
-                  <div className="flex flex-wrap gap-2">
-                    {CATEGORY_ORDER.map((c) => (
-                      <button
-                        key={c}
-                        onClick={() => setCategory(c)}
-                        className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${category === c ? 'bg-green-primary text-white' : 'bg-brand-50 text-gray-500 hover:bg-brand-100'}`}
-                      >
-                        {KNOWLEDGE_CATEGORIES[c]}
+      {filtered.length === 0 ? (
+        <Card bezel pad="none">
+          <EmptyState
+            icon={filtering ? Search : BookOpen}
+            title={filtering ? 'No notes match' : 'Your vault is empty'}
+            description={filtering ? 'Try a different search or category.' : 'Store your employment terms, client playbooks, design rules and lessons learned.'}
+            action={!filtering ? <Button trailing={<Plus size={16} strokeWidth={2} />} onClick={() => openEditor()}>Write your first note</Button> : undefined}
+          />
+        </Card>
+      ) : (
+        <ul className="columns-1 gap-4 md:columns-2 xl:columns-3 [&>li]:mb-4 [&>li]:break-inside-avoid">
+          <AnimatePresence initial={false}>
+            {filtered.map((n) => {
+              const Icon = ICONS[n.category];
+              const long = n.content.length > 240 || n.content.split('\n').length > 5;
+              const isOpen = expanded.has(n.id);
+              return (
+                <motion.li key={n.id} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}>
+                  <Card bezel spotlight pad="md">
+                    <div className="mb-3 flex items-start justify-between gap-2">
+                      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-50 text-brand-600"><Icon size={18} strokeWidth={1.6} /></span>
+                      <div className="-mr-1 flex items-center gap-1">
+                        <IconButton size="sm" tone="soft" label={n.pinned ? `Unpin ${n.title}` : `Pin ${n.title}`} aria-pressed={n.pinned} className={cn(n.pinned && '!bg-warn-100 !text-warn-700')} onClick={() => updateNote(n.id, { pinned: !n.pinned })}>
+                          {n.pinned ? <Pin size={14} strokeWidth={1.75} fill="currentColor" /> : <PinOff size={14} strokeWidth={1.75} />}
+                        </IconButton>
+                        <IconButton size="sm" tone="soft" label={`Edit ${n.title}`} onClick={() => openEditor(n)}><Pencil size={14} strokeWidth={1.75} /></IconButton>
+                        <IconButton size="sm" tone="danger" label={`Delete ${n.title}`} onClick={() => setToDelete(n)}><Trash2 size={14} strokeWidth={1.75} /></IconButton>
+                      </div>
+                    </div>
+                    <div className="mb-2 flex items-center gap-1.5">
+                      <Badge tone="brand">{KNOWLEDGE_CATEGORIES[n.category]}</Badge>
+                      {n.pinned && <Badge tone="warn">Pinned</Badge>}
+                    </div>
+                    <h3 className="text-[16px] font-semibold leading-snug tracking-tight text-ink">{n.title}</h3>
+                    {n.content && <p className={cn('mt-1.5 whitespace-pre-line text-sm leading-relaxed text-mute', !isOpen && 'line-clamp-5')}>{hide ? n.content.replace(/₱\s?[\d,]+(\.\d+)?/g, '₱•••') : n.content}</p>}
+                    {long && (
+                      <button type="button" onClick={() => setExpanded((s) => { const x = new Set(s); if (x.has(n.id)) x.delete(n.id); else x.add(n.id); return x; })} className="mt-1.5 text-xs font-medium text-brand-700 hover:text-brand-800">
+                        {isOpen ? 'Show less' : 'Read more'}
                       </button>
-                    ))}
-                  </div>
-                </div>
+                    )}
+                    {n.tags.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {n.tags.map((t) => <span key={t} className="rounded-full bg-ink/[0.05] px-2 py-0.5 text-[11px] font-medium text-mute">#{t}</span>)}
+                      </div>
+                    )}
+                    <p className="mt-4 border-t border-ink/[0.07] pt-3 text-[11px] text-mute">Updated {timeAgo(new Date(n.updatedAt).getTime())}</p>
+                  </Card>
+                </motion.li>
+              );
+            })}
+          </AnimatePresence>
+        </ul>
+      )}
 
-                {/* Tags */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1.5">Tags (comma separated)</label>
-                  <input
-                    type="text"
-                    value={tagsInput}
-                    onChange={(e) => setTagsInput(e.target.value)}
-                    placeholder="dory, salary, probation"
-                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm text-navy-900 bg-white outline-none focus:ring-2 focus:ring-green-primary/30 focus:border-transparent transition-all"
-                  />
-                </div>
-              </div>
+      <Modal
+        open={open}
+        onClose={() => setOpen(false)}
+        title={editing ? 'Edit note' : 'New note'}
+        footer={<><Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={save} disabled={!title.trim()}>{editing ? 'Save changes' : 'Create note'}</Button></>}
+      >
+        <div className="flex flex-col gap-4">
+          <Field label="Title">{(id) => <Input id={id} data-autofocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. My DORY employment terms" />}</Field>
+          <Field label="Content">{(id) => <Textarea id={id} rows={7} value={content} onChange={(e) => setContent(e.target.value)} placeholder="Write it down so future-you remembers…" />}</Field>
+          <div>
+            <p className="mb-2 text-xs font-medium text-ink-2">Category</p>
+            <Chips label="Category" value={category} onChange={setCategory} options={ORDER.map((c) => ({ value: c, label: KNOWLEDGE_CATEGORIES[c] }))} />
+          </div>
+          <Field label="Tags" hint="Comma separated">{(id) => <Input id={id} value={tags} onChange={(e) => setTags(e.target.value)} placeholder="dory, salary, probation" />}</Field>
+        </div>
+      </Modal>
 
-              <div className="flex gap-3 mt-6">
-                <button
-                  onClick={() => setShowModal(false)}
-                  className="flex-1 py-2.5 rounded-xl border border-gray-200 text-sm text-gray-500 hover:bg-gray-50 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={!title.trim()}
-                  className="flex-1 py-2.5 rounded-xl bg-green-primary text-white text-sm font-medium hover:bg-green-dark transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {editingNote ? 'Save Changes' : 'Create Note'}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <ConfirmDialog
+        open={toDelete !== null}
+        onClose={() => setToDelete(null)}
+        title={`Delete “${toDelete?.title ?? 'note'}”?`}
+        description="This can't be undone."
+        onConfirm={() => { if (toDelete) deleteNote(toDelete.id); toast('Note deleted'); }}
+      />
     </div>
   );
 }
