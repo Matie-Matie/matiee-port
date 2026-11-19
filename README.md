@@ -1,5 +1,7 @@
 # Matie Port — Business Vault
 
+<img src="docs/hero.png" alt="Matie Port landing page: Run your whole freelance business from one calm vault" width="100%" />
+
 A calm, local-first business vault for freelancers: clients, projects, payments, attendance → salary, money, files, notes and savings goals. Everything lives in the browser (`localStorage`, key `matieeport-storage`, persist version 3). Nothing is uploaded.
 
 ## Scripts
